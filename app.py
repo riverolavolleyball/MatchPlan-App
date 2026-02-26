@@ -2,172 +2,217 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
+import random
 
 # ==========================================
-# 1. CONFIGURACIÓN CORPORATIVA (RIVEROLA VOLLEYBALL)
+# 1. CONFIGURACIÓN DEL ECOSISTEMA
 # ==========================================
-st.set_page_config(page_title="MatchPlan | Riverola Volleyball", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="MatchPlan Suite | Riverola Volleyball", layout="wide")
 st.markdown("""
     <style>
     .main { background-color: #f8f9fa; color: #1e293b; font-family: 'Inter', sans-serif; }
-    .stMetric { background-color: #ffffff; border: 1px solid #e2e8f0; padding: 15px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-    [data-testid="stSidebar"] { background-color: #1e293b; color: white; }
+    [data-testid="stSidebar"] { background-color: #0f172a; color: #ffffff; }
     h1, h2, h3 { color: #0f172a; font-weight: 700; }
-    .stTabs [data-baseweb="tab-list"] { gap: 24px; border-bottom: 2px solid #e2e8f0; }
-    .stTabs [data-baseweb="tab"] { height: 50px; background-color: transparent; color: #64748b; font-weight: 600; }
-    .stTabs [data-baseweb="tab"][aria-selected="true"] { color: #2563eb; border-bottom: 3px solid #2563eb; }
+    .stMetric { background-color: white; border: 1px solid #e2e8f0; border-left: 4px solid #2563eb; padding: 15px; border-radius: 6px; }
     </style>
     """, unsafe_allow_html=True)
 
-st.markdown("<h1>🏐 MatchPlan Analytics</h1>", unsafe_allow_html=True)
-st.markdown("<p style='color: #64748b; font-size: 1.1rem; font-weight: 500;'>Powered by Riverola Volleyball | Tactical Intelligence</p>", unsafe_allow_html=True)
+# ==========================================
+# 2. MOTOR CORE DE DATAVOLLEY 4 PRO
+# ==========================================
+SKILLS = {'S': 'Saque', 'R': 'Recepción', 'E': 'Colocación', 'A': 'Ataque', 'B': 'Bloqueo', 'D': 'Defensa', 'F': 'Finta'}
+RATINGS = {'#': 'Perfecto (#)', '+': 'Positivo (+)', '!': 'Exclamación (!)', '-': 'Negativo (-)', '/': 'Pobre (/)', '=': 'Error (=)'}
 
-# ==========================================
-# 2. MOTOR DE PROCESAMIENTO TÁCTICO
-# ==========================================
-SKILLS = {'S': 'Saque', 'R': 'Recepción', 'E': 'Colocación', 'A': 'Ataque', 'B': 'Bloqueo', 'D': 'Defensa'}
-RATINGS = {'#': 'Punto / Perfecto', '+': 'Positivo', '!': 'Exclamación', '-': 'Negativo', '/': 'Pobre', '=': 'Error'}
+def extraer_coordenadas(exact_val, zone_char, is_start):
+    """Convierte matriz 100x100 o Zonas a metros reales FIVB"""
+    if exact_val and str(exact_val).isdigit() and int(exact_val) > 0:
+        val = int(exact_val)
+        return (val % 100) * 0.09, (val // 100) * 0.18
+    
+    if not zone_char or not zone_char.isdigit() or zone_char == '0': return None, None
+        
+    z = int(zone_char)
+    if is_start: # Campo Inferior
+        x_m = {1: 7.5, 2: 7.5, 3: 4.5, 4: 1.5, 5: 1.5, 6: 4.5, 7: 1.5, 8: 4.5, 9: 7.5}
+        y_m = {1: 1.5, 2: 7.5, 3: 7.5, 4: 7.5, 5: 1.5, 6: 1.5, 7: -0.5, 8: -0.5, 9: -0.5}
+    else: # Campo Superior
+        x_m = {1: 1.5, 2: 1.5, 3: 4.5, 4: 7.5, 5: 7.5, 6: 4.5, 7: 7.5, 8: 4.5, 9: 1.5}
+        y_m = {1: 16.5, 2: 10.5, 3: 10.5, 4: 10.5, 5: 16.5, 6: 16.5, 7: 18.5, 8: 18.5, 9: 18.5}
+        
+    if z in x_m: return x_m[z] + random.uniform(-0.6, 0.6), y_m[z] + random.uniform(-0.6, 0.6)
+    return None, None
 
 @st.cache_data
-def procesar_scouting(lineas):
-    try:
-        scout_idx = next(i for i, l in enumerate(lineas) if "[3SCOUT]" in l) + 1
-    except StopIteration:
-        return pd.DataFrame()
+def procesar_archivos(archivos):
+    todos_datos = []
+    
+    for archivo in archivos:
+        contenido = archivo.read().decode('latin-1').splitlines()
+        try: scout_idx = next(i for i, l in enumerate(contenido) if "[3SCOUT]" in l) + 1
+        except: continue
 
-    datos = []
-    for i, line in enumerate(lineas[scout_idx:]):
-        p = line.split(';')
-        if len(p) < 11: continue
-        c = p[0]
-        
-        if len(c) < 6 or c[0] not in ['*', 'a'] or not c[1:3].isdigit() or c[3] not in SKILLS:
-            continue
+        # Intento de extracción de nombres
+        equipo_local, equipo_vis = "Local", "Visitante"
+        for i, l in enumerate(contenido):
+            if "[3TEAMS]" in l:
+                equipo_local, equipo_vis = contenido[i+1].strip(), contenido[i+2].strip()
+                break
+
+        rec_calidad_memoria = "No K1"
+
+        for line in contenido[scout_idx:]:
+            p = line.split(';')
+            if len(p) < 11: continue
+            c = p[0]
             
-        z_in = c[9] if len(c) > 9 and c[9].isdigit() else "Desc"
-        z_out = c[10] if len(c) > 10 and c[10].isdigit() else "Desc"
-        
-        # Clasificación de Fases
-        fase = "Transición (K2)"
-        if "K1" in line: fase = "Side-Out (K1)"
-        
-        datos.append({
-            "Equipo": "Local" if c[0] == "*" else "Visitante",
-            "Dorsal": c[1:3],
-            "Fundamento": SKILLS[c[3]],
-            "Calidad": RATINGS.get(c[5], "Continuidad"),
-            "Z_Origen": z_in,
-            "Z_Destino": z_out,
-            "Fase": fase
-        })
-        
-    return pd.DataFrame(datos)
+            if len(c) < 6 or c[0] not in ['*', 'a'] or not c[1:3].isdigit() or c[3] not in SKILLS: continue
 
-def dibujar_pista_tactica(fig):
-    """Pista limpia y minimalista para análisis claro"""
+            accion = SKILLS[c[3]]
+            calidad = RATINGS.get(c[5], "Continuidad")
+            
+            # Memoria K1 para Setter Analysis
+            if accion == 'Recepción': rec_calidad_memoria = calidad
+            elif accion == 'Saque': rec_calidad_memoria = "No K1"
+
+            z_in = c[9] if len(c) > 9 and c[9] != '~' else "N/A"
+            z_out = c[10] if len(c) > 10 and c[10] != '~' else "N/A"
+            x_in, y_in = extraer_coordenadas(p[14] if len(p) > 14 else None, z_in, True)
+            x_out, y_out = extraer_coordenadas(p[15] if len(p) > 15 else None, z_out, False)
+
+            todos_datos.append({
+                "Partido": f"{equipo_local} vs {equipo_vis}",
+                "Equipo": equipo_local if c[0] == "*" else equipo_vis,
+                "Dorsal": c[1:3],
+                "Accion": accion,
+                "Calidad": calidad,
+                "Z_Ini": z_in, "Z_Fin": z_out,
+                "X_In": x_in, "Y_In": y_in, "X_Out": x_out, "Y_Out": y_out,
+                "Fase": "Side-Out (K1)" if "K1" in line else "Transición (K2)",
+                "Rec_Previa": rec_calidad_memoria if accion in ['Ataque', 'Colocación'] and "K1" in line else "-"
+            })
+            
+    return pd.DataFrame(todos_datos)
+
+def dibujar_pista_fivb():
+    fig = go.Figure()
     fig.add_shape(type="rect", x0=0, y0=0, x1=9, y1=18, line=dict(color="#1e293b", width=2))
     fig.add_shape(type="line", x0=0, y0=9, x1=9, y1=9, line=dict(color="#2563eb", width=4)) # Red
-    fig.add_shape(type="line", x0=0, y0=6, x1=9, y1=6, line=dict(color="#cbd5e1", width=2, dash="dash"))
-    fig.add_shape(type="line", x0=0, y0=12, x1=9, y1=12, line=dict(color="#cbd5e1", width=2, dash="dash"))
-    
-    # Etiquetas de zonas (Campo rival)
-    zonas_rivales = {1: (1.5, 16.5), 2: (1.5, 10.5), 3: (4.5, 10.5), 4: (7.5, 10.5), 5: (7.5, 16.5), 6: (4.5, 16.5)}
-    for z, coords in zonas_rivales.items():
-        fig.add_annotation(x=coords[0], y=coords[1], text=f"Z{z}", showarrow=False, font=dict(color="#94a3b8", size=16))
-
+    fig.add_shape(type="line", x0=0, y0=6, x1=9, y1=6, line=dict(color="#94a3b8", width=2, dash="dash"))
+    fig.add_shape(type="line", x0=0, y0=12, x1=9, y1=12, line=dict(color="#94a3b8", width=2, dash="dash"))
     fig.update_layout(xaxis=dict(range=[-0.5, 9.5], visible=False), yaxis=dict(range=[-0.5, 18.5], visible=False),
-                      plot_bgcolor="white", paper_bgcolor="white", margin=dict(l=0, r=0, t=0, b=0))
+                      plot_bgcolor="white", margin=dict(l=0, r=0, t=10, b=10))
     return fig
 
 # ==========================================
-# 3. INTERFAZ Y DASHBOARD EJECUTIVO
+# 3. INTERFAZ: SELECTOR DE APPS (MENU LATERAL)
 # ==========================================
-archivo = st.file_uploader("📥 Cargar archivo DVW (Data Volley 4)", type=["dvw"])
+st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/thumb/1/1b/Volleyball_icon.svg/200px-Volleyball_icon.svg.png", width=60)
+st.sidebar.title("MatchPlan Suite")
 
-if archivo:
-    df = procesar_scouting(archivo.read().decode('latin-1').splitlines())
+# Réplica del menú de Untangled
+app_activa = st.sidebar.radio("Navegador de Apps:", [
+    "📁 File Validator (Base de Datos)",
+    "🧠 Set Distribution (Colocación)",
+    "🏹 Attack Charts (Trayectorias)",
+    "🛡️ Defensive Analysis",
+    "⚔️ Teams Matchup",
+    "📈 League Leaderboards"
+])
+
+archivos = st.sidebar.file_uploader("📥 Cargar DVW (Soporta múltiples archivos)", type=["dvw"], accept_multiple_files=True)
+
+if archivos:
+    df = procesar_archivos(archivos)
     
     if not df.empty:
-        # --- FILTROS DE MATCH PLAN ---
-        st.sidebar.markdown("### 🎯 Configuración del Match Plan")
-        equipo_sel = st.sidebar.selectbox("Seleccionar Equipo a Analizar", df['Equipo'].unique())
-        
-        df_equipo = df[df['Equipo'] == equipo_sel]
-        
-        # --- TABS DE ANÁLISIS TÁCTICO ---
-        tab1, tab2, tab3 = st.tabs(["⚔️ Tendencias de Ataque", "🎯 Análisis de Saque", "📊 Rendimiento de Recepción"])
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("**⚙️ Filtro Global (Contexto)**")
+        equipo_sel = st.sidebar.selectbox("Analizar Equipo", df['Equipo'].unique())
+        df_eq = df[df['Equipo'] == equipo_sel]
 
-        # TAB 1: ATAQUE Y COLOCACIÓN
-        with tab1:
-            st.markdown(f"### Análisis de Ataque - {equipo_sel}")
-            df_ataque = df_equipo[df_equipo['Fundamento'] == 'Ataque']
-            
-            col1, col2 = st.columns([1, 2])
-            with col1:
-                st.markdown("**Distribución por Zonas de Origen (Tendencia del Colocador)**")
-                distribucion = df_ataque['Z_Origen'].value_counts(normalize=True) * 100
-                st.dataframe(distribucion.round(1).astype(str) + '%', use_container_width=True)
-                
-                st.markdown("**Eficiencia por Fase**")
-                for fase in ["Side-Out (K1)", "Transición (K2)"]:
-                    df_fase = df_ataque[df_ataque['Fase'] == fase]
-                    if not df_fase.empty:
-                        eff = (len(df_fase[df_fase['Calidad'] == 'Punto / Perfecto']) - len(df_fase[df_fase['Calidad'] == 'Error'])) / len(df_fase) * 100
-                        st.metric(f"EFF % - {fase}", f"{eff:.1f}%")
-
-            with col2:
-                st.markdown("**Eficacia de los Atacantes Principales**")
-                ataques_resumen = df_ataque.groupby('Dorsal').agg(
-                    Volumen=('Calidad', 'count'),
-                    Puntos=('Calidad', lambda x: (x == 'Punto / Perfecto').sum()),
-                    Errores=('Calidad', lambda x: (x == 'Error').sum())
-                ).reset_index()
-                ataques_resumen['EFF %'] = ((ataques_resumen['Puntos'] - ataques_resumen['Errores']) / ataques_resumen['Volumen'] * 100).round(1)
-                ataques_resumen = ataques_resumen[ataques_resumen['Volumen'] > 2].sort_values(by='Volumen', ascending=False)
-                st.dataframe(ataques_resumen, use_container_width=True, hide_index=True)
-
-        # TAB 2: SAQUE
-        with tab2:
-            st.markdown(f"### Presión de Saque - {equipo_sel}")
-            df_saque = df_equipo[df_equipo['Fundamento'] == 'Saque']
-            
+        # ---------------------------------------------------------
+        # APP 1: FILE VALIDATOR (Data consolidation)
+        # ---------------------------------------------------------
+        if "Validator" in app_activa:
+            st.header(f"📁 Validador de Datos: {equipo_sel}")
             c1, c2, c3 = st.columns(3)
-            c1.metric("Total Saques", len(df_saque))
-            c2.metric("Aces (#)", len(df_saque[df_saque['Calidad'] == 'Punto / Perfecto']))
-            c3.metric("Errores de Saque (=)", len(df_saque[df_saque['Calidad'] == 'Error']))
+            c1.metric("Partidos Procesados", df_eq['Partido'].nunique())
+            c2.metric("Total Acciones", len(df_eq))
+            c3.metric("Volumen de Ataque", len(df_eq[df_eq['Accion'] == 'Ataque']))
             
-            st.markdown("**Destinos de Saque Frecuentes (Zonas Rivales)**")
-            destinos = df_saque[df_saque['Z_Destino'] != 'Desc']['Z_Destino'].value_counts(normalize=True).head(5) * 100
-            st.bar_chart(destinos)
+            st.write("Base de datos estructural (Limpia y exportable):")
+            st.dataframe(df_eq[['Partido', 'Fase', 'Dorsal', 'Accion', 'Calidad', 'Z_Ini', 'Z_Fin']], use_container_width=True)
 
-            st.markdown("**Rendimiento por Sacador**")
-            saque_resumen = df_saque.groupby('Dorsal').agg(
-                Intentos=('Calidad', 'count'),
-                Aces=('Calidad', lambda x: (x == 'Punto / Perfecto').sum()),
-                Errores=('Calidad', lambda x: (x == 'Error').sum())
-            ).reset_index().sort_values(by='Intentos', ascending=False)
-            st.dataframe(saque_resumen, use_container_width=True, hide_index=True)
-
-        # TAB 3: RECEPCIÓN
-        with tab3:
-            st.markdown(f"### Estabilidad en Recepción - {equipo_sel}")
-            df_rec = df_equipo[df_equipo['Fundamento'] == 'Recepción']
+        # ---------------------------------------------------------
+        # APP 2: SET DISTRIBUTION (Tendencias del Colocador)
+        # ---------------------------------------------------------
+        elif "Distribution" in app_activa:
+            st.header(f"🧠 Set Distribution Analysis: {equipo_sel}")
+            st.markdown("Analiza la toma de decisiones del colocador en K1 basándose en la calidad de la recepción.")
             
-            if not df_rec.empty:
-                positivas = len(df_rec[df_rec['Calidad'].isin(['Punto / Perfecto', 'Positivo'])])
-                porcentaje_pos = (positivas / len(df_rec)) * 100
+            df_k1 = df_eq[(df_eq['Accion'] == 'Ataque') & (df_eq['Fase'] == 'Side-Out (K1)')]
+            
+            if not df_k1.empty:
+                # Matriz Cruzada: Recepción vs Zona de Ataque
+                crosstab = pd.crosstab(df_k1['Rec_Previa'], df_k1['Z_Ini'], normalize='index') * 100
+                st.write("**Distribución Ofensiva % (Por dónde se ataca según el pase)**")
+                st.dataframe(crosstab.round(1).astype(str) + '%', use_container_width=True)
                 
-                st.metric("Recepción Perfecta/Positiva (# / +)", f"{porcentaje_pos:.1f}%")
-                
-                st.markdown("**Carga de Recepción por Jugador**")
-                rec_resumen = df_rec.groupby('Dorsal').agg(
-                    Total=('Calidad', 'count'),
-                    Perfectas=('Calidad', lambda x: (x == 'Punto / Perfecto').sum()),
-                    Errores=('Calidad', lambda x: (x == 'Error').sum())
-                ).reset_index()
-                rec_resumen['% Perfecta'] = (rec_resumen['Perfectas'] / rec_resumen['Total'] * 100).round(1)
-                st.dataframe(rec_resumen.sort_values(by='Total', ascending=False), use_container_width=True, hide_index=True)
+                fig_bar = px.histogram(df_k1, x="Rec_Previa", color="Z_Ini", barmode="group",
+                                       title="Volumen Absoluto de Ataques por Pase",
+                                       color_discrete_sequence=px.colors.qualitative.Pastel)
+                st.plotly_chart(fig_bar, use_container_width=True)
             else:
-                st.info("No hay datos de recepción para el equipo seleccionado.")
+                st.warning("No hay datos suficientes de Side-Out para cruzar con la recepción.")
+
+        # ---------------------------------------------------------
+        # APP 3: ATTACK CHARTS (Vectores y Mapas de Calor)
+        # ---------------------------------------------------------
+        elif "Attack" in app_activa:
+            st.header(f"🏹 Attack Charts: {equipo_sel}")
+            
+            df_ataque = df_eq[df_eq['Accion'] == 'Ataque']
+            jugadores = ["Todo el Equipo"] + list(df_ataque['Dorsal'].unique())
+            jugador_sel = st.selectbox("Filtrar Atacante", jugadores)
+            
+            if jugador_sel != "Todo el Equipo":
+                df_ataque = df_ataque[df_ataque['Dorsal'] == jugador_sel]
+
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                fig_pista = dibujar_pista_fivb()
+                for _, r in df_ataque.dropna(subset=['X_In', 'X_Out']).iterrows():
+                    color = "#10b981" if "Perfecto" in r['Calidad'] else "#ef4444" if "Error" in r['Calidad'] else "#94a3b8"
+                    fig_pista.add_trace(go.Scatter(x=[r['X_In'], r['X_Out']], y=[r['Y_In'], r['Y_Out']],
+                                                 mode='lines+markers', line=dict(color=color, width=2),
+                                                 marker=dict(size=4), hoverinfo='text', 
+                                                 text=f"Fase: {r['Fase']} | Calidad: {r['Calidad']}"))
+                fig_pista.update_layout(width=500, height=800, showlegend=False)
+                st.plotly_chart(fig_pista)
+                
+            with col2:
+                st.markdown("### Rendimiento Ofensivo")
+                puntos = len(df_ataque[df_ataque['Calidad'] == 'Perfecto (#)'])
+                errores = len(df_ataque[df_ataque['Calidad'] == 'Error (=)'])
+                eff = ((puntos - errores) / len(df_ataque) * 100) if len(df_ataque) > 0 else 0
+                
+                st.metric("Total Ataques", len(df_ataque))
+                st.metric("Puntos (#)", puntos)
+                st.metric("Errores (=)", errores)
+                st.metric("Eficiencia Neta", f"{eff:.1f}%")
+                
+                st.divider()
+                st.markdown("**Leyenda Visual:**")
+                st.markdown("🟢 Punto | 🔴 Error | ⚪ Defendido")
+
+        # ---------------------------------------------------------
+        # APPS EN DESARROLLO (Placeholders Modulares)
+        # ---------------------------------------------------------
+        elif "Defensive" in app_activa or "Matchup" in app_activa or "Leaderboards" in app_activa:
+            st.header(f"🛠️ Módulo en Construcción: {app_activa}")
+            st.info("La arquitectura central ya está desplegada. Este módulo específico requiere programación de lógica adicional basada en la base de datos ya cargada.")
+            
     else:
-        st.error("No se han encontrado datos procesables.")
+        st.error("No se han extraído datos válidos.")
+else:
+    st.info("Sube uno o varios archivos .dvw en el menú lateral izquierdo para arrancar la Suite de Riverola Volleyball.")

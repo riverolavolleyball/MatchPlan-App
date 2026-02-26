@@ -34,7 +34,7 @@ def get_coordinates(exact_coord, zone, is_end=False):
         return np.random.normal(base_x, 0.4), np.random.normal(base_y, 0.4)
     return None, None
 
-# --- 3. MOTOR DE PARSEO DVW ---
+# --- 3. MOTOR DE PARSEO DVW (VERSIÓN FILTRADA Y LIMPIA) ---
 def parse_dvw(file):
     file.seek(0)
     content = file.read().decode('latin-1')
@@ -45,6 +45,10 @@ def parse_dvw(file):
     current_home_rot = None
     current_away_rot = None
     
+    # Validadores para limpiar el ruido de Data Volley
+    VALID_SKILLS = {'S', 'R', 'E', 'A', 'B', 'D', 'F'}
+    VALID_EVALS = {'#', '+', '!', '-', '/', '='}
+    
     for line in lines:
         line = line.strip()
         if '[3DATAVOLLEYSCOUT]' in line or '[3SCOUT]' in line:
@@ -53,6 +57,7 @@ def parse_dvw(file):
         if not in_scout or not line:
             continue
             
+        # Captura de cambios de rotación
         if line.startswith('*z') and len(line) >= 3 and line[2].isdigit():
             current_home_rot = f"R{line[2]}"
             continue
@@ -63,23 +68,34 @@ def parse_dvw(file):
         parts = line.split(';')
         code = parts[0]
         
+        # Filtro estricto: Solo acciones técnicas reales de jugadores
         if len(code) >= 6 and code[0] in ['*', 'a'] and code[1:3].isdigit():
-            team = code[0]
-            player = code[1:3]
             skill = code[3]
             eval_mark = code[5]
-            start_zone = code[9] if len(code) > 9 else None
-            end_zone = code[10] if len(code) > 10 else None
             
+            # Descartar si no es una técnica o evaluación válida (limpia ruidos de sistema)
+            if skill not in VALID_SKILLS or eval_mark not in VALID_EVALS:
+                continue
+                
+            team = code[0]
+            player = code[1:3]
+            
+            # Zonas tácticas
+            start_zone = code[9] if len(code) > 9 and code[9].isdigit() else None
+            end_zone = code[10] if len(code) > 10 and code[10].isdigit() else None
+            
+            # Coordenadas
             start_coord = parts[14] if len(parts) > 14 else ""
             end_coord = parts[15] if len(parts) > 15 else ""
             
             start_x, start_y = get_coordinates(start_coord, start_zone, is_end=False)
             end_x, end_y = get_coordinates(end_coord, end_zone, is_end=True)
             
+            # Fase y Rotación
             phase = "Side-Out (K1)" if "K1" in line else "Transition (K2)"
             rotation = current_home_rot if team == '*' else current_away_rot
             
+            # Tiempo de vídeo
             video_time = None
             if len(parts) > 13:
                 try:
@@ -96,6 +112,7 @@ def parse_dvw(file):
             
     df = pd.DataFrame(data)
     
+    # Feature Engineering: Calidad de pase previo para ataques en K1
     if not df.empty:
         df['Previous_Pass'] = None
         last_rec = None
@@ -107,7 +124,7 @@ def parse_dvw(file):
                 
     return df
 
-# --- 4. RENDERIZADO DE PISTA (FIVB) ---
+# --- 4. RENDERIZADO DE PISTA ---
 def draw_court(fig):
     fig.add_shape(type="rect", x0=0, y0=0, x1=9, y1=18, line=dict(color="white", width=2), fillcolor="#e08b5e", layer="below")
     fig.add_shape(type="rect", x0=0, y0=6, x1=9, y1=12, line=dict(color="white", width=2), fillcolor="#d4aa7d", layer="below")
@@ -117,7 +134,7 @@ def draw_court(fig):
     fig.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=30, b=0))
     return fig
 
-# --- 5. UI Y NAVEGACIÓN LATERAL ---
+# --- 5. UI Y NAVEGACIÓN ---
 st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/thumb/4/4e/Volleyball_icon.svg/2048px-Volleyball_icon.svg.png", width=50)
 st.sidebar.title("MatchPlan Pro")
 st.sidebar.markdown("---")
@@ -147,300 +164,135 @@ menu = st.sidebar.radio("Módulos de Análisis", [
 df_master = st.session_state.df_master
 
 if df_master.empty:
-    st.info("A la espera de carga de archivos .dvw. Sube los archivos en el menú lateral para iniciar el análisis.")
+    st.info("A la espera de carga de archivos .dvw para procesar.")
 else:
     st.sidebar.markdown("---")
     st.sidebar.markdown("### Filtros Globales")
-    
     lista_partidos = ["Todos"] + list(df_master['Match'].unique())
-    partido_seleccionado = st.sidebar.selectbox("Partido / Archivo", lista_partidos)
+    partido_seleccionado = st.sidebar.selectbox("Seleccionar Partido", lista_partidos)
     
-    if partido_seleccionado != "Todos":
-        df = df_master[df_master['Match'] == partido_seleccionado].copy()
-    else:
-        df = df_master.copy()
+    df = df_master if partido_seleccionado == "Todos" else df_master[df_master['Match'] == partido_seleccionado].copy()
 
-    # --- MÓDULO 1: VALIDADOR DE DATOS ---
+    # --- LÓGICA DE MÓDULOS ---
     if menu == "1. Validador de Datos":
-        st.header("1. Consolidación y Calidad del Dato")
-        
+        st.header("1. Consolidación de Datos")
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Acciones Totales", len(df))
-        c2.metric("Ataques Registrados", len(df[df['Skill'] == 'A']))
-        c3.metric("Saques Registrados", len(df[df['Skill'] == 'S']))
-        c4.metric("Archivos Consolidados", df['Match'].nunique())
-        
+        c1.metric("Acciones", len(df))
+        c2.metric("Ataques", len(df[df['Skill'] == 'A']))
+        c3.metric("Saques", len(df[df['Skill'] == 'S']))
+        c4.metric("Partidos", df['Match'].nunique())
         st.dataframe(df.head(100), use_container_width=True)
-        
-        st.markdown("### Exportación de Datos")
         csv_data = df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Descargar DataFrame (CSV)",
-            data=csv_data,
-            file_name=f"volley_vision_data_{partido_seleccionado}.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
+        st.download_button("📥 Descargar CSV", data=csv_data, file_name="match_data_clean.csv", mime="text/csv")
 
-    # --- MÓDULO 2: DISTRIBUCIÓN K1 ---
     elif menu == "2. Distribución K1 (Colocador)":
-        st.header("2. Tendencias de Distribución (Side-Out K1)")
-        
-        rotations_list = ["Todas", "R1", "R2", "R3", "R4", "R5", "R6"]
-        selected_rot = st.sidebar.selectbox("Filtro de Rotación (Colocador)", rotations_list)
-        
-        df_k1 = df[(df['Skill'] == 'A') & (df['Phase'] == 'Side-Out (K1)') & (df['Previous_Pass'].notna())].copy()
-        
-        if selected_rot != "Todas":
-            df_k1 = df_k1[df_k1['Rotation'] == selected_rot]
-            st.write(f"**Mostrando datos para: {selected_rot}**")
+        st.header("2. Distribución en Side-Out")
+        rot = st.sidebar.selectbox("Rotación", ["Todas", "R1", "R2", "R3", "R4", "R5", "R6"])
+        df_k1 = df[(df['Skill'] == 'A') & (df['Phase'] == 'Side-Out (K1)') & (df['Previous_Pass'].notna())]
+        if rot != "Todas": df_k1 = df_k1[df_k1['Rotation'] == rot]
         
         if not df_k1.empty:
             c1, c2 = st.columns([1, 2])
             with c1:
-                st.subheader("Distribución (%)")
-                crosstab = pd.crosstab(df_k1['Previous_Pass'], df_k1['Start_Zone'], normalize='index') * 100
-                st.dataframe(crosstab.style.format("{:.1f}%"), use_container_width=True)
-            
+                st.subheader("Crosstab %")
+                ct = pd.crosstab(df_k1['Previous_Pass'], df_k1['Start_Zone'], normalize='index') * 100
+                st.dataframe(ct.style.format("{:.1f}%"))
             with c2:
-                fig = px.bar(df_k1, x="Previous_Pass", color="Start_Zone", barmode="group",
-                             title="Ataques Absolutos por Calidad de Pase y Zona",
-                             category_orders={"Previous_Pass": ["#", "+", "!", "-", "/", "="]},
-                             color_discrete_sequence=px.colors.qualitative.Pastel)
+                fig = px.bar(df_k1, x="Previous_Pass", color="Start_Zone", barmode="group", title="Ataques por Pase")
                 st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.warning("Datos K1 insuficientes para generar la distribución.")
-
-        # Motor Predictivo
-        st.markdown("---")
-        st.subheader("Motor Predictivo de Distribución")
-        st.markdown("**Calculadora de Probabilidades:** Estima el destino del ataque rival según el contexto actual de juego.")
-        
-        c_pred1, c_pred2 = st.columns(2)
-        with c_pred1:
-            pred_rot = st.selectbox("Contexto: Rotación del Rival", ["R1", "R2", "R3", "R4", "R5", "R6"])
-        with c_pred2:
-            pred_pass = st.selectbox("Contexto: Calidad del Pase", ["#", "+", "!", "-", "/", "="])
             
-        df_pred = df[(df['Skill'] == 'A') & (df['Phase'] == 'Side-Out (K1)')]
-        df_pred = df_pred[(df_pred['Rotation'] == pred_rot) & (df_pred['Previous_Pass'] == pred_pass)]
-        
-        if not df_pred.empty:
-            prob_dist = df_pred['Start_Zone'].value_counts(normalize=True) * 100
-            st.markdown(f"**Probabilidad de Destino de Colocación (Basado en {len(df_pred)} situaciones idénticas):**")
-            
-            cols_prob = st.columns(len(prob_dist))
-            for i, (zona, prob) in enumerate(prob_dist.items()):
-                with cols_prob[i]:
-                    st.metric(label=f"Ataque por Zona {zona}", value=f"{prob:.1f}%")
-                    st.progress(int(prob) / 100)
-        else:
-            st.info("No existe histórico estadístico suficiente para esta combinación exacta de Rotación y Pase.")
+            # Predictor
+            st.markdown("---")
+            st.subheader("Motor Predictivo")
+            cp1, cp2 = st.columns(2)
+            p_rot = cp1.selectbox("Simular Rotación", ["R1", "R2", "R3", "R4", "R5", "R6"])
+            p_pass = cp2.selectbox("Simular Pase", ["#", "+", "!", "-", "/", "="])
+            df_p = df[(df['Skill'] == 'A') & (df['Rotation'] == p_rot) & (df['Previous_Pass'] == p_pass)]
+            if not df_p.empty:
+                probs = df_p['Start_Zone'].value_counts(normalize=True) * 100
+                cols = st.columns(len(probs))
+                for i, (z, p) in enumerate(probs.items()):
+                    cols[i].metric(f"Zona {z}", f"{p:.1f}%")
+                    cols[i].progress(int(p)/100)
+            else: st.info("Sin datos para esta combinación.")
 
-    # --- MÓDULO 3: MAPAS DE ATAQUE ---
     elif menu == "3. Mapas de Ataque":
-        st.header("3. Shot Charts & Densidad")
-        players = sorted(df[(df['Skill'] == 'A')]['Player'].dropna().unique())
-        selected_player = st.sidebar.selectbox("Filtrar Jugador (Ataque)", ["Todos"] + list(players))
+        st.header("3. Shot Charts")
+        players = sorted(df[df['Skill'] == 'A']['Player'].unique())
+        sel_p = st.sidebar.selectbox("Jugador", ["Todos"] + list(players))
+        df_a = df[df['Skill'] == 'A'].copy()
+        if sel_p != "Todos": df_a = df_a[df_a['Player'] == sel_p]
         
-        df_attack = df[df['Skill'] == 'A'].copy()
-        if selected_player != "Todos":
-            df_attack = df_attack[df_attack['Player'] == selected_player]
-            
-        pts = len(df_attack[df_attack['Eval'] == '#'])
-        err = len(df_attack[df_attack['Eval'] == '='])
-        total = len(df_attack)
-        eff = ((pts - err) / total * 100) if total > 0 else 0
-        
-        st.metric(f"Eficiencia de Ataque (EFF%) - {selected_player}", f"{eff:.1f}%", f"{pts} Pts | {err} Err | {total} Tot")
+        pts = len(df_a[df_a['Eval'] == '#'])
+        err = len(df_a[df_a['Eval'] == '='])
+        eff = ((pts - err) / len(df_a) * 100) if len(df_a) > 0 else 0
+        st.metric(f"EFF% {sel_p}", f"{eff:.1f}%", f"{pts} Pts | {err} Err")
 
         c1, c2 = st.columns(2)
         with c1:
-            st.subheader("Vectores de Ataque")
-            fig_vec = go.Figure()
-            draw_court(fig_vec)
-            for _, row in df_attack.dropna(subset=['Start_X', 'Start_Y', 'End_X', 'End_Y']).iterrows():
-                color = "#2ca02c" if row['Eval'] == '#' else "#d62728" if row['Eval'] == '=' else "#7f7f7f"
-                fig_vec.add_trace(go.Scatter(x=[row['Start_X'], row['End_X']], y=[row['Start_Y'], row['End_Y']],
-                                             mode='lines+markers', line=dict(color=color, width=2),
-                                             marker=dict(size=[0, 5], color=color), showlegend=False))
-            st.plotly_chart(fig_vec, use_container_width=True)
-
+            fig = go.Figure()
+            draw_court(fig)
+            for _, r in df_a.dropna(subset=['Start_X', 'End_Y']).iterrows():
+                color = "green" if r['Eval'] == '#' else "red" if r['Eval'] == '=' else "gray"
+                fig.add_trace(go.Scatter(x=[r['Start_X'], r['End_X']], y=[r['Start_Y'], r['End_Y']], mode='lines+markers', line=dict(color=color, width=1), showlegend=False))
+            st.plotly_chart(fig, use_container_width=True)
         with c2:
-            st.subheader("Heatmap de Destino")
-            fig_heat = go.Figure()
-            draw_court(fig_heat)
-            df_heat = df_attack.dropna(subset=['End_X', 'End_Y'])
-            if not df_heat.empty:
-                fig_heat.add_trace(go.Histogram2dContour(x=df_heat['End_X'], y=df_heat['End_Y'], 
-                                                         colorscale="YlOrRd", opacity=0.6, showscale=False))
-            st.plotly_chart(fig_heat, use_container_width=True)
+            fig_h = go.Figure()
+            draw_court(fig_h)
+            fig_h.add_trace(go.Histogram2dContour(x=df_a['End_X'], y=df_a['End_Y'], colorscale="YlOrRd", opacity=0.7))
+            st.plotly_chart(fig_h, use_container_width=True)
 
-    # --- MÓDULO 4: PRESIÓN DE SAQUE Y RECEPCIÓN ---
     elif menu == "4. Presión de Saque y Recepción":
-        st.header("4. Rendimiento Saque / Recepción")
-        df_serve = df[df['Skill'] == 'S']
-        df_rec = df[df['Skill'] == 'R']
-        
+        st.header("4. Saque / Recepción")
         c1, c2 = st.columns(2)
         with c1:
-            st.subheader("Métricas de Saque")
-            aces = len(df_serve[df_serve['Eval'] == '#'])
-            s_err = len(df_serve[df_serve['Eval'] == '='])
-            st.metric("Total Aces", aces)
-            st.metric("Total Errores Saque", s_err)
-            
-            fig_s = px.histogram(df_serve.dropna(subset=['End_Zone']), x='End_Zone', 
-                                 title="Destino de Saque (Zonas 1-9)", color_discrete_sequence=['#1f77b4'])
-            st.plotly_chart(fig_s, use_container_width=True)
-
+            df_s = df[df['Skill'] == 'S']
+            st.metric("Aces", len(df_s[df_s['Eval'] == '#']))
+            st.plotly_chart(px.histogram(df_s, x="End_Zone", title="Destino Saque"), use_container_width=True)
         with c2:
-            st.subheader("Estabilidad en Recepción")
-            perfect = len(df_rec[df_rec['Eval'] == '#'])
-            positive = len(df_rec[df_rec['Eval'] == '+'])
-            total_rec = len(df_rec)
-            r_eff = ((perfect + positive) / total_rec * 100) if total_rec > 0 else 0
-            st.metric("Recepción Perfecta/Positiva (#/+)", f"{r_eff:.1f}%", f"{perfect + positive} de {total_rec}")
-            
-            fig_r = px.pie(df_rec, names='Eval', title="Calidad de Pase Global", hole=0.4,
-                           color_discrete_sequence=px.colors.qualitative.Set2)
-            st.plotly_chart(fig_r, use_container_width=True)
+            df_r = df[df['Skill'] == 'R']
+            pos = len(df_r[df_r['Eval'].isin(['#', '+'])]) / len(df_r) * 100 if len(df_r) > 0 else 0
+            st.metric("Positiva %", f"{pos:.1f}%")
+            st.plotly_chart(px.pie(df_r, names='Eval', title="Calidad Recepción"), use_container_width=True)
 
-    # --- MÓDULO 5: CARA A CARA (H2H) ---
     elif menu == "5. Cara a Cara (H2H)":
-        st.header("5. Comparativa Directa (H2H Radar)")
+        st.header("5. Team Comparison")
+        def get_team_kpis(t):
+            d = df[df['Team'] == t]
+            a = d[d['Skill'] == 'A']
+            r = d[d['Skill'] == 'R']
+            eff = (len(a[a['Eval'] == '#']) - len(a[a['Eval'] == '='])) / len(a) * 100 if len(a) > 0 else 0
+            pos = len(r[r['Eval'].isin(['#', '+'])]) / len(r) * 100 if len(r) > 0 else 0
+            return [eff, pos, len(d[d['Skill'] == 'S' and d['Eval'] == '#'])]
         
-        def calc_kpis(team_code):
-            team_df = df[df['Team'] == team_code]
-            att = team_df[team_df['Skill'] == 'A']
-            k1_att = att[att['Phase'] == 'Side-Out (K1)']
-            k2_att = att[att['Phase'] == 'Transition (K2)']
-            rec = team_df[team_df['Skill'] == 'R']
-            srv = team_df[team_df['Skill'] == 'S']
-            
-            def eff(d):
-                t = len(d)
-                return ((len(d[d['Eval'] == '#']) - len(d[d['Eval'] == '='])) / t * 100) if t > 0 else 0
-            
-            pos_rec = ((len(rec[rec['Eval'] == '#']) + len(rec[rec['Eval'] == '+'])) / len(rec) * 100) if len(rec) > 0 else 0
-            
-            return {
-                "ATT_EFF": eff(att),
-                "K1_EFF": eff(k1_att),
-                "K2_EFF": eff(k2_att),
-                "REC_POS": pos_rec,
-                "ACES": len(srv[srv['Eval'] == '#'])
-            }
+        k_h = get_team_kpis('*')
+        k_a = get_team_kpis('a')
+        cat = ['EFF Ataque', 'REC Positiva', 'Aces']
+        fig = go.Figure()
+        fig.add_trace(go.Scatterpolar(r=k_h, theta=cat, fill='toself', name='Local'))
+        fig.add_trace(go.Scatterpolar(r=k_a, theta=cat, fill='toself', name='Away'))
+        st.plotly_chart(fig, use_container_width=True)
 
-        kpis_home = calc_kpis('*')
-        kpis_away = calc_kpis('a')
-        
-        categories = ['EFF% Total', 'EFF% K1', 'EFF% K2', 'REC Positiva %', 'Aces Absolutos']
-        
-        fig_radar = go.Figure()
-        fig_radar.add_trace(go.Scatterpolar(r=list(kpis_home.values()), theta=categories, fill='toself', name='Local (*)'))
-        fig_radar.add_trace(go.Scatterpolar(r=list(kpis_away.values()), theta=categories, fill='toself', name='Visitante (a)'))
-        fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 80])), showlegend=True)
-        
-        c1, c2 = st.columns([1, 2])
-        with c1:
-            st.subheader("Tabla de KPIs")
-            df_comp = pd.DataFrame([kpis_home, kpis_away], index=["Local (*)", "Visitante (a)"]).T
-            st.dataframe(df_comp.style.format("{:.1f}"), use_container_width=True)
-        with c2:
-            st.plotly_chart(fig_radar, use_container_width=True)
-
-    # --- MÓDULO 6: DOSSIER PDF ---
     elif menu == "6. Dossier PDF (Cuerpo Técnico)":
-        st.header("6. Generación de Dossier Técnico")
-        st.write("Genera un reporte ejecutivo en PDF con los KPIs globales y gráficos clave del partido seleccionado.")
-        
-        if st.button("Generar Dossier PDF", type="primary"):
-            with st.spinner("Compilando gráficos y renderizando PDF..."):
-                df_serve = df[df['Skill'] == 'S']
-                fig_s = px.histogram(df_serve.dropna(subset=['End_Zone']), x='End_Zone', title="Destino de Saque")
-                
-                df_rec = df[df['Skill'] == 'R']
-                fig_r = px.pie(df_rec, names='Eval', title="Calidad de Pase Global")
+        st.header("6. Reporte Ejecutivo")
+        if st.button("Generar PDF"):
+            pdf = FPDF()
+            pdf.add_page()
+            pdf.set_font("Arial", 'B', 16)
+            pdf.cell(0, 10, f"Reporte: {partido_seleccionado}", ln=True)
+            pdf.set_font("Arial", '', 12)
+            pdf.cell(0, 10, f"Acciones: {len(df)}", ln=True)
+            pdf.cell(0, 10, f"Ataques: {len(df[df['Skill']=='A'])}", ln=True)
+            st.download_button("Descargar PDF", data=pdf.output(dest='S').encode('latin-1'), file_name="reporte.pdf")
 
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_s, \
-                     tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_r:
-                    
-                    pio.write_image(fig_s, tmp_s.name, format="png", engine="kaleido")
-                    pio.write_image(fig_r, tmp_r.name, format="png", engine="kaleido")
-
-                    class PDF(FPDF):
-                        def header(self):
-                            self.set_font("helvetica", "B", 16)
-                            self.cell(0, 10, "MatchPlan Pro | Dossier Técnico", align="C", ln=True)
-                            self.set_font("helvetica", "I", 10)
-                            self.cell(0, 10, f"Partido/Filtro: {partido_seleccionado}", align="C", ln=True)
-                            self.ln(5)
-                        def footer(self):
-                            self.set_y(-15)
-                            self.set_font("helvetica", "I", 8)
-                            self.cell(0, 10, f"Página {self.page_no()} - Volley Vision 360", align="C")
-
-                    pdf = PDF()
-                    pdf.add_page()
-                    
-                    pdf.set_font("helvetica", "B", 14)
-                    pdf.cell(0, 10, "1. Resumen de Acciones", ln=True)
-                    pdf.set_font("helvetica", "", 12)
-                    pdf.cell(0, 8, f"Acciones Totales: {len(df)}", ln=True)
-                    pdf.cell(0, 8, f"Ataques Registrados: {len(df[df['Skill'] == 'A'])}", ln=True)
-                    pdf.cell(0, 8, f"Saques Registrados: {len(df_serve)}", ln=True)
-                    pdf.ln(10)
-
-                    pdf.set_font("helvetica", "B", 14)
-                    pdf.cell(0, 10, "2. Análisis de Saque y Recepción", ln=True)
-                    pdf.image(tmp_s.name, x=10, w=90)
-                    pdf.image(tmp_r.name, x=110, y=pdf.get_y() - 65, w=90)
-                    
-                    pdf_output = pdf.output(dest="S").encode("latin-1")
-
-                st.success("¡Dossier generado con éxito!")
-                st.download_button(
-                    label="📥 Descargar Dossier (PDF)",
-                    data=pdf_output,
-                    file_name=f"MatchPlan_Dossier_{partido_seleccionado}.pdf",
-                    mime="application/pdf",
-                    use_container_width=True
-                )
-
-    # --- MÓDULO 7: SINCRONIZACIÓN DE VÍDEO ---
     elif menu == "7. Sincronización de Vídeo":
-        st.header("7. Sincronizador de Vídeo a Corte")
-        st.markdown("**Análisis visual interactivo:** Filtra la jugada y visualiza el momento exacto.")
-        
-        video_file = st.file_uploader("Cargar vídeo del partido (.mp4)", type=["mp4"])
-        
-        c1, c2 = st.columns([1, 1])
+        st.header("7. Video Sync")
+        v_file = st.file_uploader("Video .mp4", type=["mp4"])
+        c1, c2 = st.columns(2)
         with c1:
-            st.subheader("Filtro de Acción")
-            f_skill = st.selectbox("Fundamento", df['Skill'].dropna().unique(), format_func=lambda x: {"S":"Saque", "R":"Recepción", "E":"Colocación", "A":"Ataque", "B":"Bloqueo", "D":"Defensa"}.get(x, x))
-            f_eval = st.selectbox("Evaluación", ["Todos"] + list(df[df['Skill'] == f_skill]['Eval'].dropna().unique()))
-            f_player = st.selectbox("Jugador", ["Todos"] + list(df[df['Skill'] == f_skill]['Player'].dropna().unique()))
-            
-            df_vid = df.dropna(subset=['Video_Time'])
-            df_vid = df_vid[df_vid['Skill'] == f_skill]
-            if f_eval != "Todos": df_vid = df_vid[df_vid['Eval'] == f_eval]
-            if f_player != "Todos": df_vid = df_vid[df_vid['Player'] == f_player]
-            
-            if not df_vid.empty:
-                opciones_jugada = df_vid.apply(lambda row: f"{row['Team']}{row['Player']} | {row['Phase']} | Código: {row['Code']} | Seg: {row['Video_Time']}", axis=1)
-                jugada_seleccionada = st.selectbox("Selecciona la jugada para visualizar", opciones_jugada.index, format_func=lambda x: opciones_jugada[x])
-                
-                tiempo_exacto = df_vid.loc[jugada_seleccionada, 'Video_Time']
-                start_time = max(0, int(tiempo_exacto) - 3) 
-            else:
-                st.warning("No hay jugadas con vídeo sincronizado para estos filtros.")
-                start_time = 0
-                
-        with c2:
-            st.subheader("Reproductor Táctico")
-            if video_file is not None and not df_vid.empty:
-                st.video(video_file, start_time=start_time)
-                st.info(f"Reproduciendo desde el segundo: {start_time} (Pre-roll de 3s incluido).")
-            elif video_file is None:
-                st.info("Sube un archivo de vídeo .mp4 para activar el reproductor.")
+            df_v = df.dropna(subset=['Video_Time'])
+            if not df_v.empty:
+                idx = st.selectbox("Acción", df_v.index, format_func=lambda x: f"{df_v.loc[x, 'Code']} (Seg: {df_v.loc[x, 'Video_Time']})")
+                t = max(0, int(df_v.loc[idx, 'Video_Time']) - 3)
+                if v_file: st.video(v_file, start_time=t)
+            else: st.warning("Sin marcas de tiempo en el archivo.")

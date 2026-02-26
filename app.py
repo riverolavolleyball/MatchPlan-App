@@ -3,75 +3,99 @@ import pandas as pd
 import plotly.graph_objects as go
 import re
 
-# Configuración de estilo ejecutivo
+# 1. Configuración de la página y Estilo Visual (MatchPlan Dark Mode)
 st.set_page_config(page_title="MatchPlan App", layout="wide")
 st.markdown("""
     <style>
-    .main { background-color: #0e1117; }
-    stMetric { background-color: #1f2937; padding: 15px; border-radius: 10px; }
+    .main { background-color: #0e1117; color: white; }
+    div[data-testid="stMetricValue"] { color: #00ffcc; }
     </style>
-    """, unsafe_allow_name_with_ Harris=True)
+    """, unsafe_allow_html=True)
 
-st.title("🏐 MatchPlan App - Inteligencia Táctica")
+st.title("🏐 MatchPlan App - v4.5")
 
-# Diccionarios de traducción Data Volley
-SKILLS = {'S': 'Saque', 'R': 'Recepción', 'A': 'Ataque', 'B': 'Bloqueo', 'D': 'Defensa', 'E': 'Colocación', 'F': 'Finta'}
-RATINGS = {'#': 'Punto/Excelente', '+': 'Positiva', '!': 'Exclamación', '-': 'Negativa', '/': 'Pobre', '=': 'Error'}
+# 2. Diccionarios de Traducción de Data Volley
+SKILLS = {'S': 'Saque', 'R': 'Recepción', 'E': 'Colocación', 'A': 'Ataque', 'B': 'Bloqueo', 'D': 'Defensa', 'F': 'Finta'}
+RATINGS = {'#': 'Perfecto/Punto', '+': 'Positivo', '!': 'Exclamación', '-': 'Negativo', '/': 'Pobre', '=': 'Error'}
 
 def parse_dv_line(line):
-    """Extrae datos tácticos de una línea de scout de DV4"""
-    # Dividir por punto y coma para aislar el código táctico del metadato
+    """Parser optimizado para códigos de Data Volley 4 Professional"""
+    if not line or len(line) < 10 or not line[0] in ['*', 'a']:
+        return None
+    
+    # Separamos el código táctico de los metadatos (tiempo, marcador, etc.)
     parts = line.split(';')
     code = parts[0]
     
-    # Filtro: debe empezar por * o a y tener longitud mínima
-    if not code or code[0] not in ['*', 'a'] or len(code) < 5:
-        return None
-    
     try:
-        team = "Local" if code[0] == "*" else "Visitante"
+        # Extracción por posición fija (Estándar DV)
+        # * 01 S Q = ~~~ 9 5
+        # 0 12 3 4 5 678 9 10
+        team = "Local (*)" if code[0] == "*" else "Visitante (a)"
         player = code[1:3]
         skill = SKILLS.get(code[3], "Otros")
         rating = RATINGS.get(code[5], "Neutral")
         
-        # Extracción de Zonas (Posiciones 14-15 inicio, 16-17 fin en el string de DV)
-        # En tu archivo: *01SQ=~~~95~~~L -> Zona fin es 9, subzona 5
-        start_zone = code[13:14] if len(code) > 13 and code[13].isdigit() else None
-        end_zone = code[14:15] if len(code) > 14 and code[14].isdigit() else None
+        # Zonas (índices 9 y 10 en la cadena)
+        z_in = code[9] if len(code) > 9 and code[9].isdigit() else "0"
+        z_out = code[10] if len(code) > 10 and code[10].isdigit() else "0"
         
         return {
-            "Equipo": team,
-            "Jugador": player,
-            "Fundamento": skill,
-            "Calidad": rating,
-            "Zona_In": start_zone,
-            "Zona_Out": end_zone,
-            "Hora_Relativa": parts[8] if len(parts) > 8 else "",
+            "Equipo": team, "Jugador": player, "Fundamento": skill, 
+            "Calidad": rating, "Z_In": z_in, "Z_Out": z_out,
             "Score": f"{parts[9]}-{parts[10]}" if len(parts) > 10 else "0-0",
-            "Full_Code": code
+            "Código": code
         }
     except:
         return None
 
-# Lógica de carga
-uploaded_file = st.file_uploader("Sube tu archivo .dvw de Data Volley 4", type=["dvw"])
+# 3. Interfaz de Usuario
+uploaded_file = st.file_uploader("Sube tu archivo .dvw", type=["dvw"])
 
 if uploaded_file:
-    content = uploaded_file.read().decode('latin-1').splitlines()
+    # Lectura del archivo
+    content = uploaded_file.read().decode('latin-1', errors='ignore').splitlines()
     
-    # Localizar sección [3SCOUT] o [SCOUT]
+    # Localizar sección [3SCOUT]
     start_idx = -1
     for i, line in enumerate(content):
-        if "[3SCOUT]" in line or "[SCOUT]" in line:
+        if "[3SCOUT]" in line:
             start_idx = i + 1
             break
     
     if start_idx != -1:
-        data = [parse_dv_line(l) for l in content[start_idx:]]
-        df = pd.DataFrame([d for d in data if d is not None])
+        # Procesar líneas de scouting
+        scout_data = [parse_dv_line(l) for l in content[start_idx:]]
+        df = pd.DataFrame([d for d in scout_data if d is not None])
         
-        # --- DASHBOARD ---
-        st.subheader("📊 Análisis de Rendimiento")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Acciones Totales", len(df))
-        c2.metric("Ataques", len(df[df['Fundamento'] == 'Ata
+        # 4. Dashboard de Métricas (Aquí estaba el error anterior)
+        st.subheader("📊 Resumen Táctico")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total Acciones", len(df))
+        m2.metric("Ataques", len(df[df['Fundamento'] == 'Ataque']))
+        m3.metric("Puntos", len(df[df['Calidad'] == 'Perfecto/Punto']))
+        m4.metric("Errores", len(df[df['Calidad'] == 'Error']))
+        
+        # 5. Filtros Dinámicos
+        st.sidebar.header("Match Plan Filters")
+        sel_team = st.sidebar.selectbox("Seleccionar Equipo", df['Equipo'].unique())
+        sel_skill = st.sidebar.multiselect("Filtrar Acción", df['Fundamento'].unique(), default=['Ataque', 'Saque'])
+        
+        df_view = df[(df['Equipo'] == sel_team) & (df['Fundamento'].isin(sel_skill))]
+        
+        # 6. Tabla de Datos
+        st.dataframe(df_view, use_container_width=True)
+        
+        # 7. Mini Mapa de Direcciones (Simple)
+        st.subheader("📍 Mapa de Zonas (Z_In vs Z_Out)")
+        fig = go.Figure(data=go.Scatter(
+            x=df_view['Z_In'], y=df_view['Z_Out'],
+            mode='markers',
+            marker=dict(size=12, color='#00ffcc', opacity=0.6),
+            text=df_view['Jugador']
+        ))
+        fig.update_layout(title="Distribución de Zonas", xaxis_title="Zona Inicio", yaxis_title="Zona Fin", template="plotly_dark")
+        st.plotly_chart(fig, use_container_width=True)
+
+    else:
+        st.error("No se detectó la etiqueta [3SCOUT] en el archivo.")

@@ -1,101 +1,127 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-import re
+import plotly.express as px
+import numpy as np
 
-# 1. Configuración de la página y Estilo Visual (MatchPlan Dark Mode)
-st.set_page_config(page_title="MatchPlan App", layout="wide")
+# --- CONFIGURACIÓN DE INTERFAZ PROFESIONAL ---
+st.set_page_config(page_title="MatchPlan Pro | Analytics", layout="wide")
 st.markdown("""
     <style>
-    .main { background-color: #0e1117; color: white; }
-    div[data-testid="stMetricValue"] { color: #00ffcc; }
+    .main { background-color: #0d1117; color: #c9d1d9; }
+    .stMetric { background-color: #161b22; border: 1px solid #30363d; padding: 20px; border-radius: 12px; }
     </style>
     """, unsafe_allow_html=True)
 
-st.title("🏐 MatchPlan App - v4.5")
-
-# 2. Diccionarios de Traducción de Data Volley
+# --- DICCIONARIOS TÉCNICOS ---
 SKILLS = {'S': 'Saque', 'R': 'Recepción', 'E': 'Colocación', 'A': 'Ataque', 'B': 'Bloqueo', 'D': 'Defensa', 'F': 'Finta'}
-RATINGS = {'#': 'Perfecto/Punto', '+': 'Positivo', '!': 'Exclamación', '-': 'Negativo', '/': 'Pobre', '=': 'Error'}
+RATINGS = {'#': 'Punto/Exc', '+': 'Positivo', '!': 'Excl!', '-': 'Negativo', '/': 'Pobre', '=': 'Error'}
 
-def parse_dv_line(line):
-    """Parser optimizado para códigos de Data Volley 4 Professional"""
-    if not line or len(line) < 10 or not line[0] in ['*', 'a']:
-        return None
-    
-    # Separamos el código táctico de los metadatos (tiempo, marcador, etc.)
-    parts = line.split(';')
-    code = parts[0]
-    
-    try:
-        # Extracción por posición fija (Estándar DV)
-        # * 01 S Q = ~~~ 9 5
-        # 0 12 3 4 5 678 9 10
-        team = "Local (*)" if code[0] == "*" else "Visitante (a)"
-        player = code[1:3]
-        skill = SKILLS.get(code[3], "Otros")
-        rating = RATINGS.get(code[5], "Neutral")
-        
-        # Zonas (índices 9 y 10 en la cadena)
-        z_in = code[9] if len(code) > 9 and code[9].isdigit() else "0"
-        z_out = code[10] if len(code) > 10 and code[10].isdigit() else "0"
-        
-        return {
-            "Equipo": team, "Jugador": player, "Fundamento": skill, 
-            "Calidad": rating, "Z_In": z_in, "Z_Out": z_out,
-            "Score": f"{parts[9]}-{parts[10]}" if len(parts) > 10 else "0-0",
-            "Código": code
-        }
-    except:
-        return None
+# --- MOTOR DE CÁLCULO GEOESPACIAL ---
+def get_coords(dv_coord):
+    """Convierte coordenadas DV (0-100) a Metros (9x18)"""
+    if not dv_coord or not str(dv_coord).isdigit(): return None, None
+    c = int(dv_coord)
+    x = (c % 100) * 0.09  # 0-100 -> 0-9m
+    y = (c // 100) * 0.18 # 0-100 -> 0-18m
+    return x, y
 
-# 3. Interfaz de Usuario
-uploaded_file = st.file_uploader("Sube tu archivo .dvw", type=["dvw"])
+def draw_court(fig):
+    """Dibuja las líneas oficiales de la FIVB"""
+    # Perímetro y Red
+    fig.add_shape(type="rect", x0=0, y0=0, x1=9, y1=18, line=dict(color="white", width=3))
+    fig.add_shape(type="line", x0=0, y0=9, x1=9, y1=9, line=dict(color="rgba(0, 255, 204, 0.8)", width=5))
+    # Líneas de 3 metros (Zona de ataque)
+    fig.add_shape(type="line", x0=0, y0=6, x1=9, y1=6, line=dict(color="white", width=1, dash="dash"))
+    fig.add_shape(type="line", x0=0, y0=12, x1=9, y1=12, line=dict(color="white", width=1, dash="dash"))
+    return fig
 
-if uploaded_file:
-    # Lectura del archivo
-    content = uploaded_file.read().decode('latin-1', errors='ignore').splitlines()
+# --- PARSER DE ALTA PRECISIÓN ---
+def parse_match_data(content):
+    scout_idx = next((i for i, l in enumerate(content) if "[3SCOUT]" in l or "[SCOUT]" in l), -1) + 1
+    actions = []
     
-    # Localizar sección [3SCOUT]
-    start_idx = -1
-    for i, line in enumerate(content):
-        if "[3SCOUT]" in line:
-            start_idx = i + 1
-            break
-    
-    if start_idx != -1:
-        # Procesar líneas de scouting
-        scout_data = [parse_dv_line(l) for l in content[start_idx:]]
-        df = pd.DataFrame([d for d in scout_data if d is not None])
+    for line in content[scout_idx:]:
+        p = line.split(';')
+        if not p or len(p) < 15 or not p[0] or p[0][0] not in ['*', 'a']: continue
         
-        # 4. Dashboard de Métricas (Aquí estaba el error anterior)
-        st.subheader("📊 Resumen Táctico")
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total Acciones", len(df))
-        m2.metric("Ataques", len(df[df['Fundamento'] == 'Ataque']))
-        m3.metric("Puntos", len(df[df['Calidad'] == 'Perfecto/Punto']))
-        m4.metric("Errores", len(df[df['Calidad'] == 'Error']))
+        c = p[0] # Código táctico
+        if ">" in c or "z" in c or "P" in c: continue # Filtro de ruido
         
-        # 5. Filtros Dinámicos
-        st.sidebar.header("Match Plan Filters")
-        sel_team = st.sidebar.selectbox("Seleccionar Equipo", df['Equipo'].unique())
-        sel_skill = st.sidebar.multiselect("Filtrar Acción", df['Fundamento'].unique(), default=['Ataque', 'Saque'])
+        x_in, y_in = get_coords(p[14]) if len(p) > 14 else (None, None)
+        x_out, y_out = get_coords(p[15]) if len(p) > 15 else (None, None)
         
-        df_view = df[(df['Equipo'] == sel_team) & (df['Fundamento'].isin(sel_skill))]
-        
-        # 6. Tabla de Datos
-        st.dataframe(df_view, use_container_width=True)
-        
-        # 7. Mini Mapa de Direcciones (Simple)
-        st.subheader("📍 Mapa de Zonas (Z_In vs Z_Out)")
-        fig = go.Figure(data=go.Scatter(
-            x=df_view['Z_In'], y=df_view['Z_Out'],
-            mode='markers',
-            marker=dict(size=12, color='#00ffcc', opacity=0.6),
-            text=df_view['Jugador']
-        ))
-        fig.update_layout(title="Distribución de Zonas", xaxis_title="Zona Inicio", yaxis_title="Zona Fin", template="plotly_dark")
-        st.plotly_chart(fig, use_container_width=True)
+        actions.append({
+            "Team": "Local" if c[0] == "*" else "Visitante",
+            "Player": c[1:3],
+            "Skill": SKILLS.get(c[3], "Otros"),
+            "Effect": RATINGS.get(c[5], "Neutral"),
+            "X_In": x_in, "Y_In": y_in,
+            "X_Out": x_out, "Y_Out": y_out,
+            "Set": p[11], "Score_H": p[9], "Score_V": p[10],
+            "Phase": "K1" if "K1" in line else "K2"
+        })
+    return pd.DataFrame(actions)
 
-    else:
-        st.error("No se detectó la etiqueta [3SCOUT] en el archivo.")
+# --- APP LAYOUT ---
+st.title("🏐 MatchPlan Pro | Volley Vision 360")
+file = st.file_uploader("Cargar archivo .dvw (Data Volley 4 Pro)", type=["dvw"])
+
+if file:
+    df = parse_match_data(file.read().decode('latin-1').splitlines())
+    
+    # KPIs SUPERIORES
+    st.subheader("📊 Métricas de Eficiencia")
+    col1, col2, col3, col4 = st.columns(4)
+    
+    attacks = df[df['Skill'] == 'Ataque']
+    points = len(attacks[attacks['Effect'] == 'Punto/Exc'])
+    errors = len(attacks[attacks['Effect'] == 'Error'])
+    eff = (points - errors) / len(attacks) if len(attacks) > 0 else 0
+    
+    col1.metric("Eficiencia Ataque", f"{eff:.2f}")
+    col2.metric("Puntos Ataque", points)
+    col3.metric("Errores", errors)
+    col4.metric("Acciones Totales", len(df))
+
+    # FILTROS LATERALES
+    st.sidebar.header("🕹️ Centro de Control")
+    f_team = st.sidebar.selectbox("Seleccionar Equipo", df['Team'].unique())
+    f_skill = st.sidebar.selectbox("Fundamento", df['Skill'].unique(), index=3) # Default: Ataque
+    f_phase = st.sidebar.multiselect("Fase de Juego", ["K1", "K2"], default=["K1", "K2"])
+    
+    df_f = df[(df['Team'] == f_team) & (df['Skill'] == f_skill) & (df['Phase'].isin(f_phase))]
+
+    # VISUALIZACIÓN REVOLUCIONARIA
+    tab1, tab2, tab3 = st.tabs(["🔥 Mapa de Calor", "🏹 Shot Chart (Direcciones)", "📈 Data Table"])
+    
+    with tab1:
+        st.subheader(f"Densidad de Impacto: {f_skill}")
+        if not df_f['X_Out'].dropna().empty:
+            fig_h = px.density_heatmap(df_f, x="X_Out", y="Y_Out", nbinsx=20, nbinsy=40,
+                                     range_x=[0, 9], range_y=[0, 18], template="plotly_dark",
+                                     color_continuous_scale="Viridis")
+            fig_h = draw_court(fig_h)
+            fig_h.update_layout(width=450, height=800)
+            st.plotly_chart(fig_h, use_container_width=True)
+        else:
+            st.warning("El archivo no contiene coordenadas exactas para Mapa de Calor.")
+
+    with tab2:
+        st.subheader(f"Trayectorias de {f_skill}")
+        fig_s = go.Figure()
+        fig_s = draw_court(fig_s)
+        
+        # Dibujar flechas de cada acción
+        for _, row in df_f.dropna(subset=['X_In', 'X_Out']).iterrows():
+            color = "#00ffcc" if row['Effect'] == 'Punto/Exc' else "#ff4b4b" if row['Effect'] == 'Error' else "#808080"
+            fig_s.add_trace(go.Scatter(x=[row['X_In'], row['X_Out']], y=[row['Y_In'], row['Y_Out']],
+                                     mode='lines+markers', line=dict(color=color, width=1.5),
+                                     marker=dict(size=4), hoverinfo='text', text=f"Jugador: {row['Player']}"))
+            
+        fig_s.update_layout(width=450, height=800, showlegend=False, template="plotly_dark",
+                          xaxis=dict(range=[-1, 10]), yaxis=dict(range=[-1, 19]))
+        st.plotly_chart(fig_s, use_container_width=True)
+
+    with tab3:
+        st.dataframe(df_f, use_container_width=True)

@@ -1,384 +1,446 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
-import numpy as np
-import random
-import re
+import io
+import tempfile
+from fpdf import FPDF
+import plotly.io as pio
 
-# ==========================================
-# 1. CONFIGURACIÓN DEL SISTEMA Y UI
-# ==========================================
-st.set_page_config(page_title="MatchPlan Suite | Riverola Volleyball", layout="wide", initial_sidebar_state="expanded")
-st.markdown("""
-    <style>
-    :root { --bg-color: #0f172a; --panel-bg: #1e293b; --text-main: #f8fafc; --accent: #3b82f6; }
-    .main { background-color: var(--bg-color); color: var(--text-main); font-family: 'Inter', sans-serif; }
-    .stMetric { background-color: var(--panel-bg); border: 1px solid #334155; border-left: 4px solid var(--accent); padding: 1rem; border-radius: 0.5rem; }
-    [data-testid="stSidebar"] { background-color: #020617; border-right: 1px solid #1e293b; }
-    h1, h2, h3, h4 { color: #f1f5f9; font-weight: 700; letter-spacing: -0.025em; }
-    .stDataFrame { border: 1px solid #334155; border-radius: 0.5rem; }
-    hr { border-color: #334155; }
-    </style>
-    """, unsafe_allow_html=True)
+# --- 1. CONFIGURACIÓN Y ESTADO ---
+st.set_page_config(page_title="MatchPlan Pro | Volley Vision 360", layout="wide", initial_sidebar_state="expanded")
 
-# ==========================================
-# 2. CONSTANTES TÉCNICAS (DATA VOLLEY 4 PRO)
-# ==========================================
-SKILLS = {'S': 'Saque', 'R': 'Recepción', 'E': 'Colocación', 'A': 'Ataque', 'B': 'Bloqueo', 'D': 'Defensa', 'F': 'Finta'}
-RATINGS = {'#': 'Perfecto', '+': 'Positivo', '!': 'Exclamación', '-': 'Negativo', '/': 'Pobre', '=': 'Error'}
-ZONAS_ATAQUE = ['1', '2', '3', '4', '5', '6', '7', '8', '9']
+if 'df_master' not in st.session_state:
+    st.session_state.df_master = pd.DataFrame()
 
-# ==========================================
-# 3. MOTOR GEOESPACIAL AVANZADO (JITTER ENGINE)
-# ==========================================
-def traducir_coordenadas_fivb(exact_str, zone_str, is_start):
-    """
-    Motor de renderizado espacial. 
-    Prioridad 1: Coordenada X,Y exacta (Clic del Scouter).
-    Prioridad 2: Cálculo matemático sobre el centro de la zona + Jitter gaussiano.
-    """
-    if exact_str and str(exact_str).isdigit() and int(exact_str) > 0:
-        val = int(exact_str)
-        return (val % 100) * 0.09, (val // 100) * 0.18
-    
-    if not zone_str or not str(zone_str).isdigit() or zone_char == '0':
-        return None, None
-        
-    z = int(zone_str)
-    # Matriz de centros de zona
-    if is_start:
-        x_map = {1: 7.5, 2: 7.5, 3: 4.5, 4: 1.5, 5: 1.5, 6: 4.5, 7: 1.5, 8: 4.5, 9: 7.5}
-        y_map = {1: 1.5, 2: 7.5, 3: 7.5, 4: 7.5, 5: 1.5, 6: 1.5, 7: -0.5, 8: -0.5, 9: -0.5}
-    else:
-        x_map = {1: 1.5, 2: 1.5, 3: 4.5, 4: 7.5, 5: 7.5, 6: 4.5, 7: 7.5, 8: 4.5, 9: 1.5}
-        y_map = {1: 16.5, 2: 10.5, 3: 10.5, 4: 10.5, 5: 16.5, 6: 16.5, 7: 18.5, 8: 18.5, 9: 18.5}
-        
-    if z in x_map:
-        # Distribución normal para simular impacto orgánico
-        return np.random.normal(x_map[z], 0.4), np.random.normal(y_map[z], 0.4)
+# --- 2. MOTOR GEOSPACIAL (100x100 GRID & FALLBACK) ---
+ZONE_CENTERS = {
+    '1': (7.5, 1.5), '2': (7.5, 7.5), '3': (4.5, 7.5), 
+    '4': (1.5, 7.5), '5': (1.5, 1.5), '6': (4.5, 1.5),
+    '7': (1.5, 4.5), '8': (4.5, 4.5), '9': (7.5, 4.5)
+}
+
+def get_coordinates(exact_coord, zone, is_end=False):
+    if exact_coord and exact_coord.isdigit() and len(exact_coord) >= 4:
+        val = int(exact_coord[:4])
+        x = (val % 100) * 0.09
+        y = (val // 100) * 0.18
+        if is_end: y = 18 - y 
+        return x, y
+    elif zone in ZONE_CENTERS:
+        base_x, base_y = ZONE_CENTERS[zone]
+        if is_end: base_y = 18 - base_y
+        return np.random.normal(base_x, 0.4), np.random.normal(base_y, 0.4)
     return None, None
 
-# ==========================================
-# 4. PARSER DE DATOS (DATA CLEANING & FEATURE ENGINEERING)
-# ==========================================
-@st.cache_data(show_spinner="Procesando matriz de datos...")
-def parsear_archivos_dvw(archivos):
-    master_data = []
+# --- 3. MOTOR DE PARSEO DVW ---
+def parse_dvw(file):
+    file.seek(0)
+    content = file.read().decode('latin-1')
+    lines = content.split('\n')
     
-    for archivo in archivos:
-        archivo.seek(0)
-        lineas = archivo.read().decode('latin-1', errors='ignore').splitlines()
-        
-        try:
-            scout_start = next(i for i, l in enumerate(lineas) if "[3SCOUT]" in l) + 1
-            teams_start = next(i for i, l in enumerate(lineas) if "[3TEAMS]" in l) + 1
-            eq_local = lineas[teams_start].strip()
-            eq_visitante = lineas[teams_start+1].strip()
-        except:
+    data = []
+    in_scout = False
+    current_home_rot = None
+    current_away_rot = None
+    
+    for line in lines:
+        line = line.strip()
+        if '[3DATAVOLLEYSCOUT]' in line or '[3SCOUT]' in line:
+            in_scout = True
             continue
-
-        # Memoria de estado para análisis relacional
-        memoria_recepcion = "Sin Recepción"
+        if not in_scout or not line:
+            continue
+            
+        if line.startswith('*z') and len(line) >= 3 and line[2].isdigit():
+            current_home_rot = f"R{line[2]}"
+            continue
+        if line.startswith('az') and len(line) >= 3 and line[2].isdigit():
+            current_away_rot = f"R{line[2]}"
+            continue
+            
+        parts = line.split(';')
+        code = parts[0]
         
-        for num_linea, linea in enumerate(lineas[scout_start:]):
-            p = linea.split(';')
-            if len(p) < 11: continue
+        if len(code) >= 6 and code[0] in ['*', 'a'] and code[1:3].isdigit():
+            team = code[0]
+            player = code[1:3]
+            skill = code[3]
+            eval_mark = code[5]
+            start_zone = code[9] if len(code) > 9 else None
+            end_zone = code[10] if len(code) > 10 else None
             
-            codigo = p[0]
-            if len(codigo) < 6 or codigo[0] not in ['*', 'a'] or not codigo[1:3].isdigit(): continue
-            if codigo[3] not in SKILLS: continue
-
-            equipo = eq_local if codigo[0] == "*" else eq_visitante
-            rival = eq_visitante if codigo[0] == "*" else eq_local
-            dorsal = codigo[1:3]
-            fundamento = SKILLS[codigo[3]]
-            calidad = RATINGS.get(codigo[5], "Continuidad")
+            start_coord = parts[14] if len(parts) > 14 else ""
+            end_coord = parts[15] if len(parts) > 15 else ""
             
-            # Lógica relacional (Pase -> Colocación -> Ataque)
-            if fundamento == 'Recepción': memoria_recepcion = calidad
-            elif fundamento == 'Saque': memoria_recepcion = "Sin Recepción"
-
-            z_ini = codigo[9] if len(codigo) > 9 and codigo[9].isdigit() else "N/A"
-            z_fin = codigo[10] if len(codigo) > 10 and codigo[10].isdigit() else "N/A"
+            start_x, start_y = get_coordinates(start_coord, start_zone, is_end=False)
+            end_x, end_y = get_coordinates(end_coord, end_zone, is_end=True)
             
-            x_in, y_in = traducir_coordenadas_fivb(p[14] if len(p) > 14 else None, z_ini, True)
-            x_out, y_out = traducir_coordenadas_fivb(p[15] if len(p) > 15 else None, z_fin, False)
-
-            # Clasificación Avanzada K1/K2
-            fase = "Side-Out (K1)" if "K1" in linea else "Transición (K2)"
-            if fundamento == 'Saque': fase = "Saque (BP)"
-            elif fundamento == 'Recepción': fase = "Side-Out (K1)"
-
-            master_data.append({
-                "ID_Accion": f"{eq_local[:3]}-{num_linea}",
-                "Partido": f"{eq_local} vs {eq_visitante}",
-                "Set": p[11] if len(p) > 11 else "1",
-                "Marcador": f"{p[9]}-{p[10]}",
-                "Equipo": equipo,
-                "Rival": rival,
-                "Dorsal": dorsal,
-                "Fundamento": fundamento,
-                "Calidad": calidad,
-                "Z_Origen": z_ini,
-                "Z_Destino": z_fin,
-                "X_In": x_in, "Y_In": y_in, "X_Out": x_out, "Y_Out": y_out,
-                "Fase": fase,
-                "Calidad_Pase_Previo": memoria_recepcion if fundamento in ['Colocación', 'Ataque'] else "N/A"
+            phase = "Side-Out (K1)" if "K1" in line else "Transition (K2)"
+            rotation = current_home_rot if team == '*' else current_away_rot
+            
+            video_time = None
+            if len(parts) > 13:
+                try:
+                    video_time = float(parts[13])
+                except ValueError:
+                    video_time = None
+            
+            data.append({
+                'Code': code, 'Team': team, 'Player': player, 'Skill': skill, 'Eval': eval_mark,
+                'Start_Zone': start_zone, 'End_Zone': end_zone,
+                'Start_X': start_x, 'Start_Y': start_y, 'End_X': end_x, 'End_Y': end_y,
+                'Phase': phase, 'Rotation': rotation, 'Video_Time': video_time
             })
             
-    return pd.DataFrame(master_data)
-
-# ==========================================
-# 5. RENDERIZADO VISUAL (CANVAS FIVB)
-# ==========================================
-def renderizar_cancha_fivb(opacidad_fondo=1.0):
-    fig = go.Figure()
-    # Pista Base
-    fig.add_shape(type="rect", x0=0, y0=0, x1=9, y1=18, fillcolor=f"rgba(209, 142, 84, {opacidad_fondo})", line=dict(color="#ffffff", width=2))
-    # Red
-    fig.add_shape(type="line", x0=0, y0=9, x1=9, y1=9, line=dict(color="#ef4444", width=5))
-    # Líneas de 3 metros
-    fig.add_shape(type="line", x0=0, y0=6, x1=9, y1=6, line=dict(color="#ffffff", width=2))
-    fig.add_shape(type="line", x0=0, y0=12, x1=9, y1=12, line=dict(color="#ffffff", width=2))
-    
-    fig.update_layout(
-        xaxis=dict(range=[-1, 10], visible=False),
-        yaxis=dict(range=[-1, 19], visible=False),
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=0, r=0, t=10, b=10)
-    )
-    return fig
-
-# ==========================================
-# 6. ESTRUCTURA DE LA APLICACIÓN (UI)
-# ==========================================
-st.sidebar.markdown("## 🏐 Riverola Volleyball")
-st.sidebar.markdown("<p style='color: #64748b; font-size: 0.8rem;'>TACTICAL INTELLIGENCE SUITE</p>", unsafe_allow_html=True)
-st.sidebar.divider()
-
-modo_app = st.sidebar.radio("MÓDULOS DE ANÁLISIS", [
-    "📁 1. Data Validator (Raw Data)",
-    "🧠 2. Setter Distribution (K1)",
-    "🏹 3. Attack Analytics",
-    "🎯 4. Serve & Pass Evaluation",
-    "⚔️ 5. Teams Matchup (H2H)"
-])
-
-archivos_upload = st.sidebar.file_uploader("Subir archivos de scouting (.dvw)", type=["dvw"], accept_multiple_files=True)
-
-if archivos_upload:
-    df = parsear_archivos_dvw(archivos_upload)
+    df = pd.DataFrame(data)
     
     if not df.empty:
-        st.sidebar.divider()
-        equipo_target = st.sidebar.selectbox("🎯 EQUIPO A ANALIZAR", df['Equipo'].unique())
-        df_target = df[df['Equipo'] == equipo_target]
-
-        # ---------------------------------------------------------
-        # MÓDULO 1: DATA VALIDATOR (DB & Limpieza)
-        # ---------------------------------------------------------
-        if "Validator" in modo_app:
-            st.markdown(f"## 📁 Base de Datos Consolidada: {equipo_target}")
-            st.markdown("Inspección de la estructura de datos en bruto y volumetría global.")
-            
-            kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-            kpi1.metric("Volumen Total", len(df_target))
-            kpi2.metric("Ataques (Total)", len(df_target[df_target['Fundamento'] == 'Ataque']))
-            kpi3.metric("Recepciones (Total)", len(df_target[df_target['Fundamento'] == 'Recepción']))
-            kpi4.metric("Sets Analizados", df_target['Set'].nunique())
-
-            st.dataframe(df_target.drop(columns=['ID_Accion', 'X_In', 'Y_In', 'X_Out', 'Y_Out']), use_container_width=True, height=500)
-
-        # ---------------------------------------------------------
-        # MÓDULO 2: SETTER DISTRIBUTION (Colocador)
-        # ---------------------------------------------------------
-        elif "Distribution" in modo_app:
-            st.markdown(f"## 🧠 Patrones de Distribución: {equipo_target}")
-            st.markdown("Análisis condicionado de las decisiones del colocador en función de la calidad del primer toque.")
-            
-            df_k1 = df_target[(df_target['Fundamento'] == 'Ataque') & (df_target['Fase'] == 'Side-Out (K1)')]
-            
-            if not df_k1.empty:
-                col_a, col_b = st.columns([1, 1])
-                with col_a:
-                    st.markdown("### % Distribución según Calidad de Pase")
-                    tabla_dist = pd.crosstab(df_k1['Calidad_Pase_Previo'], df_k1['Z_Origen'], normalize='index') * 100
-                    st.dataframe(tabla_dist.round(1).astype(str) + '%', use_container_width=True)
+        df['Previous_Pass'] = None
+        last_rec = None
+        for idx, row in df.iterrows():
+            if row['Skill'] == 'R':
+                last_rec = row['Eval']
+            if row['Skill'] == 'A' and row['Phase'] == 'Side-Out (K1)':
+                df.at[idx, 'Previous_Pass'] = last_rec
                 
-                with col_b:
-                    st.markdown("### Mapa de Calor de Colocación (Zonas de Origen)")
-                    fig_heat_setter = px.density_heatmap(df_k1, x="X_In", y="Y_In", nbinsx=15, nbinsy=15, 
-                                                         range_x=[0,9], range_y=[0,9], color_continuous_scale="Viridis")
-                    fig_heat_setter.update_layout(height=400, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
-                    st.plotly_chart(fig_heat_setter, use_container_width=True)
-            else:
-                st.info("No hay datos de ataque en K1 para este equipo.")
+    return df
 
-        # ---------------------------------------------------------
-        # MÓDULO 3: ATTACK ANALYTICS (Táctica Ofensiva)
-        # ---------------------------------------------------------
-        elif "Attack" in modo_app:
-            st.markdown(f"## 🏹 Attack Analytics: {equipo_target}")
-            
-            df_atk = df_target[df_target['Fundamento'] == 'Ataque']
-            
-            # Filtros Secundarios
-            f_col1, f_col2, f_col3 = st.columns(3)
-            filtro_fase = f_col1.selectbox("Fase de Juego", ["Todas"] + list(df_atk['Fase'].unique()))
-            filtro_dorsal = f_col2.selectbox("Dorsal", ["Todos"] + list(df_atk['Dorsal'].unique()))
-            filtro_zona = f_col3.selectbox("Zona de Origen", ["Todas"] + sorted([z for z in df_atk['Z_Origen'].unique() if z != 'N/A']))
+# --- 4. RENDERIZADO DE PISTA (FIVB) ---
+def draw_court(fig):
+    fig.add_shape(type="rect", x0=0, y0=0, x1=9, y1=18, line=dict(color="white", width=2), fillcolor="#e08b5e", layer="below")
+    fig.add_shape(type="rect", x0=0, y0=6, x1=9, y1=12, line=dict(color="white", width=2), fillcolor="#d4aa7d", layer="below")
+    fig.add_shape(type="line", x0=0, y0=9, x1=9, y1=9, line=dict(color="white", width=4), layer="below")
+    fig.update_xaxes(range=[-1, 10], showgrid=False, visible=False)
+    fig.update_yaxes(range=[-1, 19], showgrid=False, visible=False)
+    fig.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", margin=dict(l=0, r=0, t=30, b=0))
+    return fig
 
-            # Aplicar Filtros
-            if filtro_fase != "Todas": df_atk = df_atk[df_atk['Fase'] == filtro_fase]
-            if filtro_dorsal != "Todos": df_atk = df_atk[df_atk['Dorsal'] == filtro_dorsal]
-            if filtro_zona != "Todas": df_atk = df_atk[df_atk['Z_Origen'] == filtro_zona]
+# --- 5. UI Y NAVEGACIÓN LATERAL ---
+st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/thumb/4/4e/Volleyball_icon.svg/2048px-Volleyball_icon.svg.png", width=50)
+st.sidebar.title("MatchPlan Pro")
+st.sidebar.markdown("---")
 
-            # KPIs Avanzados
-            st.markdown("### Rendimiento Ofensivo")
-            m1, m2, m3, m4 = st.columns(4)
-            intentos = len(df_atk)
-            pts = len(df_atk[df_atk['Calidad'] == 'Perfecto'])
-            err = len(df_atk[df_atk['Calidad'] == 'Error'])
-            blk = len(df_atk[df_atk['Calidad'] == 'Negativo']) # Bola bloqueada suele marcarse así o con /
-            eff = ((pts - err - blk) / intentos * 100) if intentos > 0 else 0
-            
-            m1.metric("Intentos (N)", intentos)
-            m2.metric("Kill % (Puntos)", f"{(pts/intentos*100):.1f}%" if intentos > 0 else "0%")
-            m3.metric("Error/Block %", f"{((err+blk)/intentos*100):.1f}%" if intentos > 0 else "0%")
-            m4.metric("Eficiencia Pura (EFF)", f"{eff:.1f}%")
+uploaded_files = st.sidebar.file_uploader("Cargar archivos .dvw", type=['dvw'], accept_multiple_files=True)
 
-            # Visualización Espacial
-            v1, v2 = st.columns([1, 1])
-            with v1:
-                st.markdown("#### Shot Chart (Vectores Físicos)")
-                fig_shot = renderizar_cancha_fivb(opacidad_fondo=0.1)
-                for _, r in df_atk.dropna(subset=['X_In', 'X_Out']).iterrows():
-                    color = "#10b981" if r['Calidad'] == 'Perfecto' else "#ef4444" if r['Calidad'] == 'Error' else "#94a3b8"
-                    fig_shot.add_trace(go.Scatter(x=[r['X_In'], r['X_Out']], y=[r['Y_In'], r['Y_Out']],
-                                                 mode='lines+markers', line=dict(color=color, width=2.5),
-                                                 marker=dict(size=6, symbol='circle'), 
-                                                 hoverinfo='text', text=f"Dorsal {r['Dorsal']} | Res: {r['Calidad']}"))
-                fig_shot.update_layout(height=650, showlegend=False)
-                st.plotly_chart(fig_shot, use_container_width=True)
-            
-            with v2:
-                st.markdown("#### Impact Heatmap (Densidad de Destinos)")
-                if not df_atk['X_Out'].dropna().empty:
-                    fig_dense = px.density_contour(df_atk, x="X_Out", y="Y_Out", range_x=[0,9], range_y=[0,18], 
-                                                   color_discrete_sequence=['#3b82f6'])
-                    fig_dense.update_traces(contours_coloring="fill", contours_showlabels=True)
-                    fig_dense.update_layout(height=650, plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
-                                            xaxis=dict(visible=False), yaxis=dict(visible=False))
-                    # Añadir líneas de pista sobre el contorno
-                    fig_dense.add_shape(type="rect", x0=0, y0=0, x1=9, y1=18, line=dict(color="#ffffff", width=2))
-                    fig_dense.add_shape(type="line", x0=0, y0=9, x1=9, y1=9, line=dict(color="#ffffff", width=4))
-                    st.plotly_chart(fig_dense, use_container_width=True)
+if uploaded_files:
+    dfs = []
+    for file in uploaded_files:
+        df_parsed = parse_dvw(file)
+        df_parsed['Match'] = file.name 
+        dfs.append(df_parsed)
+    if dfs:
+        st.session_state.df_master = pd.concat(dfs, ignore_index=True)
 
-        # ---------------------------------------------------------
-        # MÓDULO 4: SERVE & PASS (Saque y Recepción)
-        # ---------------------------------------------------------
-        elif "Serve" in modo_app:
-            st.markdown(f"## 🎯 Serve & Pass Evaluation: {equipo_target}")
-            
-            df_saq = df_target[df_target['Fundamento'] == 'Saque']
-            df_rec = df_target[df_target['Fundamento'] == 'Recepción']
+menu = st.sidebar.radio("Módulos de Análisis", [
+    "1. Validador de Datos", 
+    "2. Distribución K1 (Colocador)", 
+    "3. Mapas de Ataque", 
+    "4. Presión de Saque y Recepción", 
+    "5. Cara a Cara (H2H)",
+    "6. Dossier PDF (Cuerpo Técnico)",
+    "7. Sincronización de Vídeo"
+])
 
-            col_s, col_r = st.columns(2)
-            
-            # BLOQUE SAQUE
-            with col_s:
-                st.markdown("### Rendimiento en Saque (BP)")
-                total_s = len(df_saq)
-                aces = len(df_saq[df_saq['Calidad'] == 'Perfecto'])
-                err_s = len(df_saq[df_saq['Calidad'] == 'Error'])
-                
-                sm1, sm2, sm3 = st.columns(3)
-                sm1.metric("Total Saques", total_s)
-                sm2.metric("Aces (#)", aces)
-                sm3.metric("Errores (=)", err_s)
+# --- 6. FILTRADO GLOBAL ---
+df_master = st.session_state.df_master
 
-                st.markdown("#### Mapa de Zonas de Impacto de Saque")
-                fig_saq_map = renderizar_cancha_fivb(opacidad_fondo=0.1)
-                for _, r in df_saq.dropna(subset=['X_Out']).iterrows():
-                    color = "#10b981" if r['Calidad'] == 'Perfecto' else "#ef4444" if r['Calidad'] == 'Error' else "#f59e0b"
-                    fig_saq_map.add_trace(go.Scatter(x=[r['X_Out']], y=[r['Y_Out']], mode='markers',
-                                                     marker=dict(color=color, size=10), hoverinfo='text', 
-                                                     text=f"Dorsal {r['Dorsal']} | {r['Calidad']}"))
-                fig_saq_map.update_layout(height=500, showlegend=False)
-                st.plotly_chart(fig_saq_map, use_container_width=True)
-
-            # BLOQUE RECEPCIÓN
-            with col_r:
-                st.markdown("### Estabilidad en Recepción (K1)")
-                total_r = len(df_rec)
-                perf_r = len(df_rec[df_rec['Calidad'] == 'Perfecto'])
-                pos_r = len(df_rec[df_rec['Calidad'] == 'Positivo'])
-                err_r = len(df_rec[df_rec['Calidad'] == 'Error'])
-                
-                rm1, rm2, rm3 = st.columns(3)
-                rm1.metric("Volumen Rec.", total_r)
-                rm2.metric("Pase Perfecto (#)", f"{(perf_r/total_r*100):.1f}%" if total_r > 0 else "0%")
-                rm3.metric("Eficiencia Positiva", f"{((perf_r+pos_r-err_r)/total_r*100):.1f}%" if total_r > 0 else "0%")
-
-                st.markdown("#### Carga de Recepción por Jugador")
-                rec_stats = df_rec.groupby('Dorsal').agg(
-                    Total=('Calidad', 'count'),
-                    Perfectas=('Calidad', lambda x: (x == 'Perfecto').sum()),
-                    Errores=('Calidad', lambda x: (x == 'Error').sum())
-                ).reset_index()
-                rec_stats['% Perfecto'] = (rec_stats['Perfectas'] / rec_stats['Total'] * 100).round(1)
-                st.dataframe(rec_stats.sort_values(by='Total', ascending=False), use_container_width=True, hide_index=True)
-
-        # ---------------------------------------------------------
-        # MÓDULO 5: TEAMS MATCHUP (H2H)
-        # ---------------------------------------------------------
-        elif "Matchup" in modo_app:
-            st.markdown("## ⚔️ Teams Matchup (Comparativa Directa)")
-            rival_target = df_target['Rival'].iloc[0] if not df_target.empty else "Rival"
-            
-            def extraer_kpis_avanzados(dataset):
-                atk = dataset[dataset['Fundamento'] == 'Ataque']
-                rec = dataset[dataset['Fundamento'] == 'Recepción']
-                saq = dataset[dataset['Fundamento'] == 'Saque']
-                blk = dataset[dataset['Fundamento'] == 'Bloqueo']
-                
-                # Fórmulas FIBA/FIVB estándar
-                eff_atk = ((len(atk[atk['Calidad'] == 'Perfecto']) - len(atk[atk['Calidad'] == 'Error'])) / len(atk) * 100) if len(atk) > 0 else 0
-                kill_pct = (len(atk[atk['Calidad'] == 'Perfecto']) / len(atk) * 100) if len(atk) > 0 else 0
-                rec_perf = (len(rec[rec['Calidad'] == 'Perfecto']) / len(rec) * 100) if len(rec) > 0 else 0
-                aces_ps = len(saq[saq['Calidad'] == 'Perfecto']) / dataset['Set'].nunique() if dataset['Set'].nunique() > 0 else 0
-                blk_ps = len(blk[blk['Calidad'] == 'Perfecto']) / dataset['Set'].nunique() if dataset['Set'].nunique() > 0 else 0
-                
-                return {"EFF Ataque %": eff_atk, "Kill %": kill_pct, "Rec Perfecta %": rec_perf, "Aces / Set": aces_ps, "Blocks / Set": blk_ps}
-
-            kpis_eq1 = extraer_kpis_avanzados(df[df['Equipo'] == equipo_target])
-            kpis_eq2 = extraer_kpis_avanzados(df[df['Equipo'] == rival_target])
-
-            df_comp = pd.DataFrame({
-                "Métrica": list(kpis_eq1.keys()),
-                equipo_target: [round(v, 2) for v in kpis_eq1.values()],
-                rival_target: [round(v, 2) for v in kpis_eq2.values()]
-            })
-
-            col_t, col_r = st.columns([1, 1.5])
-            with col_t:
-                st.markdown("### Balance Cuantitativo")
-                st.dataframe(df_comp, use_container_width=True, hide_index=True)
-            
-            with col_r:
-                st.markdown("### Radar de Dominio")
-                # Escalado interno para visualización en radar (Aces y Blocks se multiplican para verse en el eje 0-100)
-                categorias = ['EFF Ataque %', 'Kill %', 'Rec Perfecta %']
-                fig_radar = go.Figure()
-                fig_radar.add_trace(go.Scatterpolar(r=[kpis_eq1[c] for c in categorias], theta=categorias, fill='toself', name=equipo_target, line_color='#3b82f6'))
-                fig_radar.add_trace(go.Scatterpolar(r=[kpis_eq2[c] for c in categorias], theta=categorias, fill='toself', name=rival_target, line_color='#ef4444'))
-                fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 70])),
-                                        plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', font=dict(color="white"))
-                st.plotly_chart(fig_radar, use_container_width=True)
-
-    else:
-        st.error("Error crítico: No se ha podido extraer la matriz de datos del archivo.")
+if df_master.empty:
+    st.info("A la espera de carga de archivos .dvw. Sube los archivos en el menú lateral para iniciar el análisis.")
 else:
-    st.info("Despliegue inicial de Riverola Volleyball Analytics completado. A la espera de carga de archivos (.dvw) en el panel lateral.")
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Filtros Globales")
+    
+    lista_partidos = ["Todos"] + list(df_master['Match'].unique())
+    partido_seleccionado = st.sidebar.selectbox("Partido / Archivo", lista_partidos)
+    
+    if partido_seleccionado != "Todos":
+        df = df_master[df_master['Match'] == partido_seleccionado].copy()
+    else:
+        df = df_master.copy()
+
+    # --- MÓDULO 1: VALIDADOR DE DATOS ---
+    if menu == "1. Validador de Datos":
+        st.header("1. Consolidación y Calidad del Dato")
+        
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Acciones Totales", len(df))
+        c2.metric("Ataques Registrados", len(df[df['Skill'] == 'A']))
+        c3.metric("Saques Registrados", len(df[df['Skill'] == 'S']))
+        c4.metric("Archivos Consolidados", df['Match'].nunique())
+        
+        st.dataframe(df.head(100), use_container_width=True)
+        
+        st.markdown("### Exportación de Datos")
+        csv_data = df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Descargar DataFrame (CSV)",
+            data=csv_data,
+            file_name=f"volley_vision_data_{partido_seleccionado}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+
+    # --- MÓDULO 2: DISTRIBUCIÓN K1 ---
+    elif menu == "2. Distribución K1 (Colocador)":
+        st.header("2. Tendencias de Distribución (Side-Out K1)")
+        
+        rotations_list = ["Todas", "R1", "R2", "R3", "R4", "R5", "R6"]
+        selected_rot = st.sidebar.selectbox("Filtro de Rotación (Colocador)", rotations_list)
+        
+        df_k1 = df[(df['Skill'] == 'A') & (df['Phase'] == 'Side-Out (K1)') & (df['Previous_Pass'].notna())].copy()
+        
+        if selected_rot != "Todas":
+            df_k1 = df_k1[df_k1['Rotation'] == selected_rot]
+            st.write(f"**Mostrando datos para: {selected_rot}**")
+        
+        if not df_k1.empty:
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                st.subheader("Distribución (%)")
+                crosstab = pd.crosstab(df_k1['Previous_Pass'], df_k1['Start_Zone'], normalize='index') * 100
+                st.dataframe(crosstab.style.format("{:.1f}%"), use_container_width=True)
+            
+            with c2:
+                fig = px.bar(df_k1, x="Previous_Pass", color="Start_Zone", barmode="group",
+                             title="Ataques Absolutos por Calidad de Pase y Zona",
+                             category_orders={"Previous_Pass": ["#", "+", "!", "-", "/", "="]},
+                             color_discrete_sequence=px.colors.qualitative.Pastel)
+                st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("Datos K1 insuficientes para generar la distribución.")
+
+        # Motor Predictivo
+        st.markdown("---")
+        st.subheader("Motor Predictivo de Distribución")
+        st.markdown("**Calculadora de Probabilidades:** Estima el destino del ataque rival según el contexto actual de juego.")
+        
+        c_pred1, c_pred2 = st.columns(2)
+        with c_pred1:
+            pred_rot = st.selectbox("Contexto: Rotación del Rival", ["R1", "R2", "R3", "R4", "R5", "R6"])
+        with c_pred2:
+            pred_pass = st.selectbox("Contexto: Calidad del Pase", ["#", "+", "!", "-", "/", "="])
+            
+        df_pred = df[(df['Skill'] == 'A') & (df['Phase'] == 'Side-Out (K1)')]
+        df_pred = df_pred[(df_pred['Rotation'] == pred_rot) & (df_pred['Previous_Pass'] == pred_pass)]
+        
+        if not df_pred.empty:
+            prob_dist = df_pred['Start_Zone'].value_counts(normalize=True) * 100
+            st.markdown(f"**Probabilidad de Destino de Colocación (Basado en {len(df_pred)} situaciones idénticas):**")
+            
+            cols_prob = st.columns(len(prob_dist))
+            for i, (zona, prob) in enumerate(prob_dist.items()):
+                with cols_prob[i]:
+                    st.metric(label=f"Ataque por Zona {zona}", value=f"{prob:.1f}%")
+                    st.progress(int(prob) / 100)
+        else:
+            st.info("No existe histórico estadístico suficiente para esta combinación exacta de Rotación y Pase.")
+
+    # --- MÓDULO 3: MAPAS DE ATAQUE ---
+    elif menu == "3. Mapas de Ataque":
+        st.header("3. Shot Charts & Densidad")
+        players = sorted(df[(df['Skill'] == 'A')]['Player'].dropna().unique())
+        selected_player = st.sidebar.selectbox("Filtrar Jugador (Ataque)", ["Todos"] + list(players))
+        
+        df_attack = df[df['Skill'] == 'A'].copy()
+        if selected_player != "Todos":
+            df_attack = df_attack[df_attack['Player'] == selected_player]
+            
+        pts = len(df_attack[df_attack['Eval'] == '#'])
+        err = len(df_attack[df_attack['Eval'] == '='])
+        total = len(df_attack)
+        eff = ((pts - err) / total * 100) if total > 0 else 0
+        
+        st.metric(f"Eficiencia de Ataque (EFF%) - {selected_player}", f"{eff:.1f}%", f"{pts} Pts | {err} Err | {total} Tot")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("Vectores de Ataque")
+            fig_vec = go.Figure()
+            draw_court(fig_vec)
+            for _, row in df_attack.dropna(subset=['Start_X', 'Start_Y', 'End_X', 'End_Y']).iterrows():
+                color = "#2ca02c" if row['Eval'] == '#' else "#d62728" if row['Eval'] == '=' else "#7f7f7f"
+                fig_vec.add_trace(go.Scatter(x=[row['Start_X'], row['End_X']], y=[row['Start_Y'], row['End_Y']],
+                                             mode='lines+markers', line=dict(color=color, width=2),
+                                             marker=dict(size=[0, 5], color=color), showlegend=False))
+            st.plotly_chart(fig_vec, use_container_width=True)
+
+        with c2:
+            st.subheader("Heatmap de Destino")
+            fig_heat = go.Figure()
+            draw_court(fig_heat)
+            df_heat = df_attack.dropna(subset=['End_X', 'End_Y'])
+            if not df_heat.empty:
+                fig_heat.add_trace(go.Histogram2dContour(x=df_heat['End_X'], y=df_heat['End_Y'], 
+                                                         colorscale="YlOrRd", opacity=0.6, showscale=False))
+            st.plotly_chart(fig_heat, use_container_width=True)
+
+    # --- MÓDULO 4: PRESIÓN DE SAQUE Y RECEPCIÓN ---
+    elif menu == "4. Presión de Saque y Recepción":
+        st.header("4. Rendimiento Saque / Recepción")
+        df_serve = df[df['Skill'] == 'S']
+        df_rec = df[df['Skill'] == 'R']
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("Métricas de Saque")
+            aces = len(df_serve[df_serve['Eval'] == '#'])
+            s_err = len(df_serve[df_serve['Eval'] == '='])
+            st.metric("Total Aces", aces)
+            st.metric("Total Errores Saque", s_err)
+            
+            fig_s = px.histogram(df_serve.dropna(subset=['End_Zone']), x='End_Zone', 
+                                 title="Destino de Saque (Zonas 1-9)", color_discrete_sequence=['#1f77b4'])
+            st.plotly_chart(fig_s, use_container_width=True)
+
+        with c2:
+            st.subheader("Estabilidad en Recepción")
+            perfect = len(df_rec[df_rec['Eval'] == '#'])
+            positive = len(df_rec[df_rec['Eval'] == '+'])
+            total_rec = len(df_rec)
+            r_eff = ((perfect + positive) / total_rec * 100) if total_rec > 0 else 0
+            st.metric("Recepción Perfecta/Positiva (#/+)", f"{r_eff:.1f}%", f"{perfect + positive} de {total_rec}")
+            
+            fig_r = px.pie(df_rec, names='Eval', title="Calidad de Pase Global", hole=0.4,
+                           color_discrete_sequence=px.colors.qualitative.Set2)
+            st.plotly_chart(fig_r, use_container_width=True)
+
+    # --- MÓDULO 5: CARA A CARA (H2H) ---
+    elif menu == "5. Cara a Cara (H2H)":
+        st.header("5. Comparativa Directa (H2H Radar)")
+        
+        def calc_kpis(team_code):
+            team_df = df[df['Team'] == team_code]
+            att = team_df[team_df['Skill'] == 'A']
+            k1_att = att[att['Phase'] == 'Side-Out (K1)']
+            k2_att = att[att['Phase'] == 'Transition (K2)']
+            rec = team_df[team_df['Skill'] == 'R']
+            srv = team_df[team_df['Skill'] == 'S']
+            
+            def eff(d):
+                t = len(d)
+                return ((len(d[d['Eval'] == '#']) - len(d[d['Eval'] == '='])) / t * 100) if t > 0 else 0
+            
+            pos_rec = ((len(rec[rec['Eval'] == '#']) + len(rec[rec['Eval'] == '+'])) / len(rec) * 100) if len(rec) > 0 else 0
+            
+            return {
+                "ATT_EFF": eff(att),
+                "K1_EFF": eff(k1_att),
+                "K2_EFF": eff(k2_att),
+                "REC_POS": pos_rec,
+                "ACES": len(srv[srv['Eval'] == '#'])
+            }
+
+        kpis_home = calc_kpis('*')
+        kpis_away = calc_kpis('a')
+        
+        categories = ['EFF% Total', 'EFF% K1', 'EFF% K2', 'REC Positiva %', 'Aces Absolutos']
+        
+        fig_radar = go.Figure()
+        fig_radar.add_trace(go.Scatterpolar(r=list(kpis_home.values()), theta=categories, fill='toself', name='Local (*)'))
+        fig_radar.add_trace(go.Scatterpolar(r=list(kpis_away.values()), theta=categories, fill='toself', name='Visitante (a)'))
+        fig_radar.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 80])), showlegend=True)
+        
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            st.subheader("Tabla de KPIs")
+            df_comp = pd.DataFrame([kpis_home, kpis_away], index=["Local (*)", "Visitante (a)"]).T
+            st.dataframe(df_comp.style.format("{:.1f}"), use_container_width=True)
+        with c2:
+            st.plotly_chart(fig_radar, use_container_width=True)
+
+    # --- MÓDULO 6: DOSSIER PDF ---
+    elif menu == "6. Dossier PDF (Cuerpo Técnico)":
+        st.header("6. Generación de Dossier Técnico")
+        st.write("Genera un reporte ejecutivo en PDF con los KPIs globales y gráficos clave del partido seleccionado.")
+        
+        if st.button("Generar Dossier PDF", type="primary"):
+            with st.spinner("Compilando gráficos y renderizando PDF..."):
+                df_serve = df[df['Skill'] == 'S']
+                fig_s = px.histogram(df_serve.dropna(subset=['End_Zone']), x='End_Zone', title="Destino de Saque")
+                
+                df_rec = df[df['Skill'] == 'R']
+                fig_r = px.pie(df_rec, names='Eval', title="Calidad de Pase Global")
+
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_s, \
+                     tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_r:
+                    
+                    pio.write_image(fig_s, tmp_s.name, format="png", engine="kaleido")
+                    pio.write_image(fig_r, tmp_r.name, format="png", engine="kaleido")
+
+                    class PDF(FPDF):
+                        def header(self):
+                            self.set_font("helvetica", "B", 16)
+                            self.cell(0, 10, "MatchPlan Pro | Dossier Técnico", align="C", ln=True)
+                            self.set_font("helvetica", "I", 10)
+                            self.cell(0, 10, f"Partido/Filtro: {partido_seleccionado}", align="C", ln=True)
+                            self.ln(5)
+                        def footer(self):
+                            self.set_y(-15)
+                            self.set_font("helvetica", "I", 8)
+                            self.cell(0, 10, f"Página {self.page_no()} - Volley Vision 360", align="C")
+
+                    pdf = PDF()
+                    pdf.add_page()
+                    
+                    pdf.set_font("helvetica", "B", 14)
+                    pdf.cell(0, 10, "1. Resumen de Acciones", ln=True)
+                    pdf.set_font("helvetica", "", 12)
+                    pdf.cell(0, 8, f"Acciones Totales: {len(df)}", ln=True)
+                    pdf.cell(0, 8, f"Ataques Registrados: {len(df[df['Skill'] == 'A'])}", ln=True)
+                    pdf.cell(0, 8, f"Saques Registrados: {len(df_serve)}", ln=True)
+                    pdf.ln(10)
+
+                    pdf.set_font("helvetica", "B", 14)
+                    pdf.cell(0, 10, "2. Análisis de Saque y Recepción", ln=True)
+                    pdf.image(tmp_s.name, x=10, w=90)
+                    pdf.image(tmp_r.name, x=110, y=pdf.get_y() - 65, w=90)
+                    
+                    pdf_output = pdf.output(dest="S").encode("latin-1")
+
+                st.success("¡Dossier generado con éxito!")
+                st.download_button(
+                    label="📥 Descargar Dossier (PDF)",
+                    data=pdf_output,
+                    file_name=f"MatchPlan_Dossier_{partido_seleccionado}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+
+    # --- MÓDULO 7: SINCRONIZACIÓN DE VÍDEO ---
+    elif menu == "7. Sincronización de Vídeo":
+        st.header("7. Sincronizador de Vídeo a Corte")
+        st.markdown("**Análisis visual interactivo:** Filtra la jugada y visualiza el momento exacto.")
+        
+        video_file = st.file_uploader("Cargar vídeo del partido (.mp4)", type=["mp4"])
+        
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            st.subheader("Filtro de Acción")
+            f_skill = st.selectbox("Fundamento", df['Skill'].dropna().unique(), format_func=lambda x: {"S":"Saque", "R":"Recepción", "E":"Colocación", "A":"Ataque", "B":"Bloqueo", "D":"Defensa"}.get(x, x))
+            f_eval = st.selectbox("Evaluación", ["Todos"] + list(df[df['Skill'] == f_skill]['Eval'].dropna().unique()))
+            f_player = st.selectbox("Jugador", ["Todos"] + list(df[df['Skill'] == f_skill]['Player'].dropna().unique()))
+            
+            df_vid = df.dropna(subset=['Video_Time'])
+            df_vid = df_vid[df_vid['Skill'] == f_skill]
+            if f_eval != "Todos": df_vid = df_vid[df_vid['Eval'] == f_eval]
+            if f_player != "Todos": df_vid = df_vid[df_vid['Player'] == f_player]
+            
+            if not df_vid.empty:
+                opciones_jugada = df_vid.apply(lambda row: f"{row['Team']}{row['Player']} | {row['Phase']} | Código: {row['Code']} | Seg: {row['Video_Time']}", axis=1)
+                jugada_seleccionada = st.selectbox("Selecciona la jugada para visualizar", opciones_jugada.index, format_func=lambda x: opciones_jugada[x])
+                
+                tiempo_exacto = df_vid.loc[jugada_seleccionada, 'Video_Time']
+                start_time = max(0, int(tiempo_exacto) - 3) 
+            else:
+                st.warning("No hay jugadas con vídeo sincronizado para estos filtros.")
+                start_time = 0
+                
+        with c2:
+            st.subheader("Reproductor Táctico")
+            if video_file is not None and not df_vid.empty:
+                st.video(video_file, start_time=start_time)
+                st.info(f"Reproduciendo desde el segundo: {start_time} (Pre-roll de 3s incluido).")
+            elif video_file is None:
+                st.info("Sube un archivo de vídeo .mp4 para activar el reproductor.")

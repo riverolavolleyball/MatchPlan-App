@@ -151,26 +151,31 @@ def calculate_player_stats(df):
     
     return pd.concat([df_stats, total_row], ignore_index=True)
 
-# --- GENERADORES DE GRÁFICOS H2H ---
-def plot_tornado_percent(kpis_e1, kpis_e2, name1, name2):
-    categories = ['Ataque Pts%', 'Ataque Eff%', 'Rec Pos%', 'Rec Exc%']
-    val1 = [kpis_e1.get(c, 0) for c in categories]
-    val2 = [-kpis_e2.get(c, 0) for c in categories] 
-    fig = go.Figure()
-    fig.add_trace(go.Bar(y=categories, x=val1, name=name1, orientation='h', marker_color='#00d4ff', text=val1, textposition='outside'))
-    fig.add_trace(go.Bar(y=categories, x=val2, name=name2, orientation='h', marker_color='#ff3366', text=[abs(v) for v in val2], textposition='outside'))
-    fig.update_layout(barmode='relative', title="Métricas de Eficiencia (%)", yaxis_autorange="reversed", bargap=0.2, template=CHART_THEME, xaxis=dict(range=[-100, 100], tickvals=[-100, -50, 0, 50, 100], ticktext=['100', '50', '0', '50', '100']))
-    return fig
+# --- GENERADOR GRÁFICO TORNADO UNIFICADO (H2H) ---
+def plot_unified_tornado(kpis_e1, kpis_e2, name1, name2):
+    categories = ['Puntos Tot', 'Aces', 'Bloqueos', 'Ataque Pts%', 'Ataque Eff%', 'Rec Pos%', 'Rec Exc%']
+    categories.reverse() # Invertimos para que Puntos Tot salga arriba
+    
+    # Entidad 1 va a la izquierda (valores negativos), Entidad 2 a la derecha (positivos)
+    val1 = [-kpis_e1.get(c, 0) for c in categories]
+    val2 = [kpis_e2.get(c, 0) for c in categories] 
+    
+    # Formateo de texto para añadir '%' a las métricas que lo requieren
+    text_val1 = [f"{abs(v)}%" if "%" in c else str(abs(v)) for v, c in zip(val1, categories)]
+    text_val2 = [f"{v}%" if "%" in c else str(v) for v, c in zip(val2, categories)]
 
-def plot_tornado_absolute(kpis_e1, kpis_e2, name1, name2):
-    categories = ['Puntos Tot', 'Aces', 'Bloqueos']
-    val1 = [kpis_e1.get(c, 0) for c in categories]
-    val2 = [-kpis_e2.get(c, 0) for c in categories] 
-    max_val = max(max(val1) if val1 else 0, max([abs(v) for v in val2]) if val2 else 0) + 5
     fig = go.Figure()
-    fig.add_trace(go.Bar(y=categories, x=val1, name=name1, orientation='h', marker_color='#00ff99', text=val1, textposition='outside'))
-    fig.add_trace(go.Bar(y=categories, x=val2, name=name2, orientation='h', marker_color='#ffcc00', text=[abs(v) for v in val2], textposition='outside'))
-    fig.update_layout(barmode='relative', title="Métricas de Volumen (Absolutos)", yaxis_autorange="reversed", bargap=0.2, template=CHART_THEME, xaxis=dict(range=[-max_val, max_val]))
+    fig.add_trace(go.Bar(y=categories, x=val1, name=name1, orientation='h', marker_color='#00d4ff', text=text_val1, textposition='outside'))
+    fig.add_trace(go.Bar(y=categories, x=val2, name=name2, orientation='h', marker_color='#ff3366', text=text_val2, textposition='outside'))
+    
+    fig.update_layout(
+        barmode='relative',
+        title=f"⚔️ {name1} vs {name2}",
+        bargap=0.2,
+        template=CHART_THEME,
+        xaxis=dict(showticklabels=False, title=""), # Ocultamos el eje X para evitar confusión visual
+        yaxis=dict(title="")
+    )
     return fig
 
 # --- MENÚ LATERAL ---
@@ -240,34 +245,34 @@ if uploaded_files:
         if tipo_h2h == "Equipos":
             equipos_disp = df_master['Equipo'].unique().tolist()
             if len(equipos_disp) >= 2:
-                e1 = c1.selectbox("Entidad Izquierda:", equipos_disp, index=0)
-                e2 = c2.selectbox("Entidad Derecha:", equipos_disp, index=1)
+                e1 = c1.selectbox("Entidad Izquierda (Azul):", equipos_disp, index=0)
+                e2 = c2.selectbox("Entidad Derecha (Rojo):", equipos_disp, index=1)
+                
                 s1 = calculate_player_stats(df_master[df_master['Equipo'] == e1])
                 s2 = calculate_player_stats(df_master[df_master['Equipo'] == e2])
                 stats_e1 = s1.iloc[-1].to_dict() if not s1.empty else {}
                 stats_e2 = s2.iloc[-1].to_dict() if not s2.empty else {}
                 
                 if stats_e1 and stats_e2:
-                    c_graf1, c_graf2 = st.columns(2)
-                    with c_graf1: st.plotly_chart(plot_tornado_percent(stats_e1, stats_e2, e1, e2), use_container_width=True)
-                    with c_graf2: st.plotly_chart(plot_tornado_absolute(stats_e1, stats_e2, e1, e2), use_container_width=True)
+                    st.plotly_chart(plot_unified_tornado(stats_e1, stats_e2, e1, e2), use_container_width=True)
+                    st.caption("🔍 **Lectura Táctica:** Gráfico Tornado Unificado. Comparativa directa de volúmenes (Aces, Bloqueos) y eficiencias (%) en un solo vistazo rápido.")
                     
                     st.markdown("### 📋 Matriz Comparativa")
                     st.dataframe(pd.DataFrame([stats_e1, stats_e2]).set_index('Jugador/a')[['Puntos Tot', 'Aces', 'Bloqueos', 'Ataque Pts%', 'Ataque Eff%', 'Rec Pos%', 'Rec Exc%']].style.format("{:.0f}"), use_container_width=True)
         elif tipo_h2h == "Jugadores/as":
             jugs_disp = sorted(df_master['Jugador/a'].unique().tolist())
             if len(jugs_disp) >= 2:
-                j1 = c1.selectbox("Jugador/a Izquierda:", jugs_disp, index=0)
-                j2 = c2.selectbox("Jugador/a Derecha:", jugs_disp, index=1)
+                j1 = c1.selectbox("Jugador/a Izquierda (Azul):", jugs_disp, index=0)
+                j2 = c2.selectbox("Jugador/a Derecha (Rojo):", jugs_disp, index=1)
+                
                 s1 = calculate_player_stats(df_master[df_master['Jugador/a'] == j1])
                 s2 = calculate_player_stats(df_master[df_master['Jugador/a'] == j2])
                 stats_j1 = s1.iloc[0].to_dict() if len(s1) > 1 else {}
                 stats_j2 = s2.iloc[0].to_dict() if len(s2) > 1 else {}
                 
                 if stats_j1 and stats_j2:
-                    c_graf1, c_graf2 = st.columns(2)
-                    with c_graf1: st.plotly_chart(plot_tornado_percent(stats_j1, stats_j2, j1, j2), use_container_width=True)
-                    with c_graf2: st.plotly_chart(plot_tornado_absolute(stats_j1, stats_j2, j1, j2), use_container_width=True)
+                    st.plotly_chart(plot_unified_tornado(stats_j1, stats_j2, j1, j2), use_container_width=True)
+                    st.caption("🔍 **Lectura Táctica:** Evaluación bidireccional de perfiles. Ideal para toma de decisiones sobre alineaciones o emparejamientos en red.")
                     
                     st.markdown("### 📋 Matriz Comparativa")
                     st.dataframe(pd.DataFrame([stats_j1, stats_j2]).set_index('Jugador/a')[['Puntos Tot', 'Aces', 'Bloqueos', 'Ataque Pts%', 'Ataque Eff%', 'Rec Pos%', 'Rec Exc%']].style.format("{:.0f}"), use_container_width=True)

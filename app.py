@@ -5,7 +5,7 @@ import plotly.express as px
 # --- CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(page_title="MatchPlan Pro", layout="wide", initial_sidebar_state="expanded")
 
-# --- MOTOR DE LECTURA DVW (Blindado y Neutro) ---
+# --- MOTOR DE LECTURA DVW (Extracción Heurística de Nombres) ---
 def parse_dvw_with_names(file):
     file.seek(0)
     content = file.read().decode('latin-1')
@@ -29,32 +29,33 @@ def parse_dvw_with_names(file):
         if line.startswith('[3SCOUT]'): section = "SCOUT"; continue
         if line.startswith('['): section = "OTHER"; continue
         
-        # Extraer Nombres de Equipos
+        # Extraer Nombres de Equipos Reales (Ignorando el ID)
         if section == "TEAMS":
             parts = line.split(';')
-            if len(parts) > 0:
-                if team_line_count == 0: teams_map['*'] = parts[0].strip()
-                elif team_line_count == 1: teams_map['a'] = parts[0].strip()
+            if len(parts) > 1:
+                # El nombre suele estar en la posición 1, el ID en la 0
+                team_name = parts[1].strip() if parts[1].strip() else parts[0].strip()
+                if team_line_count == 0: teams_map['*'] = team_name
+                elif team_line_count == 1: teams_map['a'] = team_name
                 team_line_count += 1
                 
-        # Extraer Equipo Local
-        elif section == "PLAYERS_H":
+        # Extraer Jugadores/as (Ignorando IDs federativos)
+        elif section in ["PLAYERS_H", "PLAYERS_V"]:
             parts = line.split(';')
-            if len(parts) >= 3:
+            if len(parts) >= 4:
                 try:
                     num = str(int(parts[1].strip()))
-                    name = parts[2].strip()
-                    players_map['*'][num] = f"{num}. {name}"
-                except: pass
-                
-        # Extraer Equipo Visitante
-        elif section == "PLAYERS_V":
-            parts = line.split(';')
-            if len(parts) >= 3:
-                try:
-                    num = str(int(parts[1].strip()))
-                    name = parts[2].strip()
-                    players_map['a'][num] = f"{num}. {name}"
+                    # Buscar el primer bloque de texto que contenga letras (el nombre real)
+                    name = f"Jugador/a {num}"
+                    for p in parts[3:]:
+                        if any(c.isalpha() for c in p):
+                            name = p.strip()
+                            break
+                    
+                    if section == "PLAYERS_H":
+                        players_map['*'][num] = f"{num}. {name}"
+                    else:
+                        players_map['a'][num] = f"{num}. {name}"
                 except: pass
 
         # Extraer Acciones
@@ -206,6 +207,7 @@ if uploaded_files:
             df_graficos = df_resumen[df_resumen['Jugador/a'] != 'TOTAL EQUIPO'].copy()
             
             if not df_graficos.empty:
+                # FILA 1: Puntos y Balance G-P
                 c1, c2 = st.columns(2)
                 
                 with c1:
@@ -213,41 +215,63 @@ if uploaded_files:
                     if not df_pts.empty:
                         fig_pts = px.bar(df_pts, x='Puntos Tot', y='Jugador/a', orientation='h', 
                                          title="Máximos/as Anotadores/as", text='Puntos Tot', color='Puntos Tot')
+                        fig_pts.update_traces(textposition='outside')
                         fig_pts.update_layout(showlegend=False)
                         st.plotly_chart(fig_pts, use_container_width=True)
-                    
+                        
                 with c2:
-                    df_rec = df_graficos[df_graficos['Rec Tot'] > 0]
-                    if not df_rec.empty:
-                        fig_rec = px.scatter(df_rec, x='Rec Tot', y='Rec Pos%', size='Rec Tot', color='Jugador/a',
-                                             title="Volumen vs Eficacia en Recepción",
-                                             hover_name='Jugador/a')
-                        fig_rec.add_hline(y=50, line_dash="dot", annotation_text="Meta 50%")
-                        st.plotly_chart(fig_rec, use_container_width=True)
-
-                c3, c4 = st.columns(2)
-                
-                with c3:
                     df_gp = df_graficos.sort_values(by='G-P', ascending=True)
                     df_gp['Color'] = df_gp['G-P'].apply(lambda x: 'Positivo' if x >= 0 else 'Negativo')
                     fig_gp = px.bar(df_gp, x='G-P', y='Jugador/a', orientation='h', color='Color',
-                                    title="Balance Ganados - Perdidos (G-P)",
+                                    title="Balance Global (Puntos Ganados vs Errores)", text='G-P',
                                     color_discrete_map={'Positivo': '#2ca02c', 'Negativo': '#d62728'})
+                    fig_gp.update_traces(textposition='outside')
+                    fig_gp.update_layout(showlegend=False)
                     st.plotly_chart(fig_gp, use_container_width=True)
+
+                # FILA 2: Origen de Puntos y Origen de Errores
+                c3, c4 = st.columns(2)
+                
+                with c3:
+                    tot_saque_pts = df_graficos['Saque Pts'].sum()
+                    tot_ataque_pts = df_graficos['Ataque Pts'].sum()
+                    tot_bloqueo_pts = df_graficos['Bloqueo Pts'].sum()
                     
-                with c4:
-                    tot_saque = df_graficos['Saque Pts'].sum()
-                    tot_ataque = df_graficos['Ataque Pts'].sum()
-                    tot_bloqueo = df_graficos['Bloqueo Pts'].sum()
-                    
-                    if (tot_saque + tot_ataque + tot_bloqueo) > 0:
-                        df_dist = pd.DataFrame({
+                    if (tot_saque_pts + tot_ataque_pts + tot_bloqueo_pts) > 0:
+                        df_dist_pts = pd.DataFrame({
                             'Fundamento': ['Ataque', 'Bloqueo', 'Saque (Aces)'],
-                            'Puntos': [tot_ataque, tot_bloqueo, tot_saque]
+                            'Volumen': [tot_ataque_pts, tot_bloqueo_pts, tot_saque_pts]
                         })
-                        fig_pie = px.pie(df_dist, values='Puntos', names='Fundamento', hole=0.4, 
-                                         title="Origen de los Puntos")
-                        fig_pie.update_traces(textposition='inside', textinfo='percent+label')
-                        st.plotly_chart(fig_pie, use_container_width=True)
+                        fig_pie_pts = px.pie(df_dist_pts, values='Volumen', names='Fundamento', hole=0.4, 
+                                         title="🟢 Origen de los Puntos Generados",
+                                         color_discrete_sequence=px.colors.qualitative.Pastel)
+                        fig_pie_pts.update_traces(textposition='inside', textinfo='percent+label')
+                        st.plotly_chart(fig_pie_pts, use_container_width=True)
+
+                with c4:
+                    tot_saque_err = df_graficos['Saque Err'].sum()
+                    tot_ataque_err = df_graficos['Ataque Err'].sum()
+                    tot_rec_err = df_graficos['Rec Err'].sum()
+                    
+                    if (tot_saque_err + tot_ataque_err + tot_rec_err) > 0:
+                        df_dist_err = pd.DataFrame({
+                            'Fundamento': ['Ataque (Fallos)', 'Saque (Fallos)', 'Recepción (Fallos)'],
+                            'Volumen': [tot_ataque_err, tot_saque_err, tot_rec_err]
+                        })
+                        fig_pie_err = px.pie(df_dist_err, values='Volumen', names='Fundamento', hole=0.4, 
+                                         title="🔴 Origen de los Errores Cometidos",
+                                         color_discrete_sequence=px.colors.qualitative.Set2)
+                        fig_pie_err.update_traces(textposition='inside', textinfo='percent+label')
+                        st.plotly_chart(fig_pie_err, use_container_width=True)
+                        
+                # FILA 3: Recepción
+                df_rec = df_graficos[df_graficos['Rec Tot'] > 0]
+                if not df_rec.empty:
+                    fig_rec = px.scatter(df_rec, x='Rec Tot', y='Rec Pos%', size='Rec Tot', color='Jugador/a',
+                                         title="Volumen vs Eficacia en Recepción (Tamaño = Recepciones Totales)",
+                                         hover_name='Jugador/a', text='Jugador/a')
+                    fig_rec.update_traces(textposition='top center')
+                    fig_rec.add_hline(y=50, line_dash="dot", annotation_text="Meta 50%")
+                    st.plotly_chart(fig_rec, use_container_width=True)
 else:
     st.info("👋 Sube un archivo de Data Volley (.dvw) en el menú lateral para empezar.")
